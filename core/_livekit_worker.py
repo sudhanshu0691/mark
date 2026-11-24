@@ -97,40 +97,29 @@ class LiveKitAgentWorker:
             logger.error("Voice turn failed: %s", type(task.exception()).__name__)
 
     async def handle_text(self, text):
-        from core import llm, brain
-        from core.intent import is_conversation
-        from memory.conversation import recent_messages
+        from core.agents.runtime import execute_turn
         from memory import db
         async with self._turn_lock:
             if not self._is_running:
                 return
             self._cancel.clear()
-            cfg = llm.load_config()
-            active = await asyncio.to_thread(db.get_active_conversation)
-            conversation_id = active["id"] if active else None
-            history = await asyncio.to_thread(recent_messages, conversation_id=conversation_id)
-            history = [{**m, "_local_only": not cfg.get("share_history_with_cloud", False)} for m in history]
-            # Serialize against the existing typed-command worker.
             lock = self.markdown_adapter._local_command_lock
             if not lock.acquire(blocking=False):
                 await self.speak_text("Another task is running. Please try again.")
                 return
             try:
-                if is_conversation(text):
-                    reply = await asyncio.to_thread(llm.chat_raw, history + [{"role":"user","content":text}], role="fast")
-                    answer = reply.get("content", "").strip()
-                else:
-                    answer = await asyncio.to_thread(
-                        brain.run_goal, text, declarations=self.markdown_adapter._all_declarations(),
-                        dispatch=self.markdown_adapter._dispatch_sync, history=history,
-                        cancelled=self._cancel.is_set)
-                if not answer:
-                    answer = "No response was received."
-                await asyncio.to_thread(db.append_conversation_turn, text, answer,
+                active = await asyncio.to_thread(db.get_active_conversation)
+                conversation_id = active["id"] if active else None
+                answer = await asyncio.to_thread(
+                    execute_turn, text, dispatch=self.markdown_adapter._dispatch_sync,
+                    declarations=self.markdown_adapter._all_declarations,
+                    conversation_id=conversation_id, cancelled=self._cancel.is_set)
+                head = answer.split("\nEXECUTION TRACE:")[0].strip()
+                await asyncio.to_thread(db.append_conversation_turn, text, head,
                                         channel="voice", conversation_id=conversation_id)
                 if not self._cancel.is_set():
-                    await self.send_text(answer)
-                    await self.speak_text(answer.split("\nEXECUTION TRACE:")[0][:1800])
+                    await self.send_text(head)
+                    await self.speak_text(head[:1800])
             finally:
                 lock.release()
 

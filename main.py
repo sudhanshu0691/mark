@@ -936,35 +936,18 @@ class MarkLive:
             if message.startswith("[brain") and "->" in message:
                 TASKS.checkpoint(tid, message[:140])
 
+        conversation_id = None
         try:
-            command = match_local_command(text)
-            if command:
-                report = self._dispatch_sync(*command)
-            else:
-                self.ui.write_log(f"{name}: working on it...")
-                cfg = _llm.load_config()
-                history = recent_messages()
-                # The configured provider receives the current request. Past conversations
-                # travel separately and the provider router strips them for cloud.
-                for message in history:
-                    message["_local_only"] = not cfg.get("share_history_with_cloud", False)
-                facts = format_memory_for_prompt(load_memory())[:1500]
-                if facts:
-                    history.insert(0, {"role": "user", "content": "Stored preferences for reference: " + facts,
-                                       "_local_only": not cfg.get("share_history_with_cloud", False)})
-                if is_conversation(text):
-                    if cfg["backend"] == "gemini" and history and not cfg.get("share_history_with_cloud"):
-                        history = []
-                    messages = [{"role": "system", "content": "Reply briefly in the user's language. Use prior dialogue for reference. If the detail is unavailable, say so. /no_think"},
-                                *history, {"role":"user","content":text}]
-                    answer = _llm.chat_raw(messages, role="fast", max_tokens=192)
-                    report = _llm_config._clean(answer.get("content", "")) or "[FAILED] Empty conversational response."
-                else:
-                    TASKS.stage(tid, "PLANNING")
-                    report = _brain.run_goal(
-                        goal=text, declarations=self._all_declarations(), dispatch=self._dispatch_sync,
-                        log=log_progress, history=history, max_steps=_brain.MAX_STEPS_DEFAULT,
-                        cancelled=self._local_cancel_event.is_set)
+            from core.agents.runtime import execute_turn
+            from memory import db
+            active = db.get_active_conversation()
+            conversation_id = active["id"] if active else None
+            report = execute_turn(text, dispatch=self._dispatch_sync,
+                                  declarations=self._all_declarations,
+                                  conversation_id=conversation_id,
+                                  cancelled=self._local_cancel_event.is_set,
+                                  log=log_progress,
+                                  on_plan=lambda: TASKS.stage(tid, "PLANNING"))
         except Exception as e:
             report = f"RESULT: FAILED\nDONE: none\nNOT DONE: local brain crashed: {type(e).__name__}: {e}"
             self.ui.write_log(f"ERR: local brain crashed: {type(e).__name__}: {e}")
@@ -973,7 +956,8 @@ class MarkLive:
         self._active_task_id = None
         head = report.split("\nEXECUTION TRACE:")[0].strip()
         self.ui.write_log(f"{name}: {head[:900]}")
-        append_conversation_turn(text, head, channel="typed")
+        from memory import db
+        db.append_conversation_turn(text, head, channel="typed", conversation_id=conversation_id)
         cfg = _llm.load_config()
         if cfg["profile"] in {"offline", "low_resource"} and cfg.get("speak_local_replies"):
             try:
