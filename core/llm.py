@@ -338,9 +338,12 @@ class GeminiProvider(InferenceProvider):
         return gemini_health()
     
     async def generate(self, messages: list[dict], **kwargs: Any) -> dict:
-        from core.inference.gemini import GeminiProvider as GeminiAdapter
-
-        return await GeminiAdapter().generate(messages, **kwargs)
+        return await asyncio.to_thread(
+            chat_raw, messages, role=kwargs.get("role", "text"), tools=kwargs.get("tools"),
+            temperature=kwargs.get("temperature"), max_tokens=kwargs.get("max_tokens"),
+            json_mode=kwargs.get("json_mode", False), on_delta=kwargs.get("on_delta"),
+            cancelled=kwargs.get("cancelled"), provider_override="gemini",
+        )
 
 
 # --------------------------------------------------------------------------- web grounding

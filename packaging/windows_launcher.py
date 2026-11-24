@@ -1,18 +1,32 @@
 """Windows executable launcher for a source-based, locked MARK distribution."""
-import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
+
 
 def main():
-    root = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent.parent
-    python = root / ".venv" / "Scripts" / "pythonw.exe"
+    if getattr(sys, "frozen", False):
+        root = Path(sys.executable).resolve().parent
+    else:
+        root = Path(__file__).resolve().parent.parent
+    scripts = root / ".venv" / "Scripts"
+    program = root / "main.py"
+    python = scripts / "pythonw.exe"
+    if sys.argv[1:] == ["--check"]:
+        console = scripts / "python.exe"
+        if not console.is_file() or not python.is_file() or not program.is_file():
+            return 1
+        return subprocess.run([str(console), "-c", "import main"], cwd=root, check=False).returncode
     if not python.is_file():
         import ctypes
-        ctypes.windll.user32.MessageBoxW(None, "Run setup_windows.bat before launching MARK.", "MARK setup required", 0x10)
+
+        ctypes.windll.user32.MessageBoxW(
+            None, "Run setup_windows.bat before launching MARK.", "MARK setup required", 0x10,
+        )
         return 1
-    subprocess.Popen([str(python), str(root / "main.py")], cwd=root)
+    subprocess.Popen([str(python), str(program)], cwd=root)
     return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
