@@ -64,7 +64,7 @@ class ProviderRegistry:
             provider = self.providers[name]
             score = 0
 
-            if preferences.get("prefer_local", True) and name == "ollama":
+            if preferences.get("prefer_local", False) and name == "ollama":
                 score += 100
 
             if preferences.get("prefer_fast", False):

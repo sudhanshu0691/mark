@@ -56,7 +56,7 @@ CONFIG_PATH = BASE_DIR / "config" / "llm.json"
 
 DEFAULTS: dict[str, Any] = {
     "profile": "balanced",
-    "backend": "ollama",
+    "backend": "multi_provider",
     "host": "http://127.0.0.1:11434",
     "text_model": "qwen3:4b", "code_model": "qwen3:4b",
     "fast_model": "qwen3:4b", "vision_model": "qwen2.5vl:3b",
@@ -113,7 +113,7 @@ def _provider_request(provider: str):
 
 
 def _run_provider(provider: str, function, *args):
-    if provider == "gemini" and load_config().get("profile") == "offline":
+    if load_config().get("profile") == "offline":
         raise LLMUnavailable("Cloud LLM requests are disabled in offline profile.")
     with _provider_request(provider):
         return function(*args)
@@ -142,13 +142,13 @@ def load_config(refresh: bool = False) -> dict[str, Any]:
         for key, env in _ENV.items():
             if os.environ.get(env):
                 cfg[key] = os.environ[env]
+        if isinstance(cfg.get("providers", {}).get("gemini"), dict):
+            cfg["gemini"].update(cfg["providers"]["gemini"])
         host = str(cfg["host"]).strip()
         cfg["host"] = (host if host.startswith("http") else "http://" + host).rstrip("/")
         cfg["profile"] = os.getenv("MARK_PROFILE", cfg.get("profile", "balanced")).strip().lower()
-        if cfg["profile"] == "offline":
-            cfg["backend"] = "ollama"
-        if cfg.get("backend") not in {"ollama", "gemini", "multi_provider"}:
-            raise LLMUnavailable("Unsupported LLM backend. Choose ollama or gemini.")
+        if cfg.get("backend") not in {"gemini", "multi_provider"}:
+            raise LLMUnavailable("Unsupported LLM backend. Choose multi_provider or gemini.")
         _cfg_cache = cfg
         return cfg
 
@@ -519,36 +519,37 @@ def chat_raw(messages: list[dict], role: str = "text", tools: list[dict] | None 
              model: str | None = None, json_mode: bool = False) -> dict:
     """Send one chat request to the configured provider."""
     cfg = load_config()
-    local_messages = [{k: v for k, v in msg.items() if k != "_local_only"} for msg in messages]
-    if cfg.get("backend") == "multi_provider":
-        # Free-tier eligibility is account-specific; never assume that a model is free.
-        if cfg.get("free_tier_only", True) and not cfg.get("verified_free_models"):
-            if not cfg.get("automatic_fallback", True):
-                raise LLMUnavailable("Cloud model free-tier eligibility is not verified.")
-            return _run_provider("ollama", _ollama_chat, local_messages, role, tools, temperature, max_tokens, model, json_mode)
-        cloud_messages = [clean for clean, original in zip(local_messages, messages) if not original.get("_local_only")]
-        if not cfg.get("share_history_with_cloud", False):
-            last_user = next ( (i for i in range(len(cloud_messages)-1, -1, -1) if cloud_messages[i].get("role") == "user"), -1)
-            cloud_messages = [m for m in cloud_messages[:last_user] if m.get("role") == "system"] + cloud_messages[last_user:] if last_user >= 0 else []
+    if cfg.get("profile") == "offline":
+        raise LLMUnavailable("Cloud inference is disabled in offline profile.")
+    cloud_messages = [{k: v for k, v in msg.items() if k != "_local_only"}
+                      for msg in messages if not msg.get("_local_only")]
+    if role == "vision" and not cfg.get("allow_cloud_vision", False):
+        raise LLMUnavailable("Cloud vision is not authorized.")
+    if cfg.get("backend") == "gemini" or role == "vision":
+        order = ["gemini"]
+    else:
+        primary = cfg.get("primary_provider", "groq")
+        order = [primary]
+        if cfg.get("automatic_fallback", True):
+            order += cfg.get("fallback_providers", ["gemini"])
+    failures = []
+    for provider in dict.fromkeys(order):
+        if provider not in {"groq", "gemini"}:
+            continue
+        if provider == "groq" and role == "vision":
+            continue
+        if provider == "groq" and any(m.get("_gemini_content") is not None for m in cloud_messages):
+            continue
         try:
-            if role == "vision":
-                if not cfg.get("allow_cloud_vision", False):
-                    raise LLMUnavailable("Cloud vision is not authorized.")
-                vision_model = cfg.get("gemini", {}).get("vision_model")
-                if cfg.get("free_tier_only", True) and vision_model not in cfg.get("verified_free_models", []):
-                    raise LLMUnavailable("Gemini model free-tier eligibility is not verified.")
+            if provider == "gemini":
+                name = cfg.get("gemini", {}).get("vision_model" if role == "vision" else "text_model")
+                if cfg.get("free_tier_only", True) and name not in cfg.get("verified_free_models", []):
+                    raise LLMUnavailable("Gemini model is not on the configured allowlist.")
                 return _run_provider("gemini", _gemini_chat, cloud_messages, role, tools, temperature, max_tokens, json_mode)
             return _run_provider("groq", _groq_chat, cloud_messages, role, tools, temperature, max_tokens, json_mode)
-        except (LLMUnavailable, providers.BudgetExceeded):
-            if not cfg.get("automatic_fallback", True):
-                raise
-            return _run_provider("ollama", _ollama_chat, local_messages, role, tools, temperature, max_tokens, model, json_mode)
-    if cfg.get("backend") == "gemini":
-        cloud_messages = [clean for clean, original in zip(local_messages, messages) if not original.get("_local_only")]
-        return _run_provider("gemini", _gemini_chat, cloud_messages, role, tools, temperature, max_tokens, json_mode)
-    if cfg.get("backend") == "ollama":
-        return _run_provider("ollama", _ollama_chat, local_messages, role, tools, temperature, max_tokens, model, json_mode)
-    raise LLMUnavailable("Unsupported LLM backend. Choose ollama or gemini.")
+        except (LLMUnavailable, providers.BudgetExceeded) as exc:
+            failures.append(f"{provider}: {exc}")
+    raise LLMUnavailable("Cloud inference unavailable: " + "; ".join(failures))
 
 
 def _groq_chat(messages, role, tools, temperature, max_tokens, json_mode):
@@ -760,19 +761,11 @@ def missing_models(cfg: dict, installed: list[dict]) -> list[str]:
 
 def health() -> dict:
     cfg = load_config()
-    if cfg["backend"] == "gemini":
-        from core.secrets import get_secret
-        ok = bool(get_secret("gemini") and cfg.get("gemini", {}).get("text_model"))
-        return {"ok": ok, "backend": "gemini", "missing": [], "message": "Gemini configured." if ok else "Gemini requires a credential and model."}
-    import requests
-    try:
-        response = requests.get(cfg["host"] + "/api/tags", timeout=4)
-        response.raise_for_status()
-        missing = missing_models(cfg, response.json().get("models", []))
-    except (requests.RequestException, ValueError):
-        return {"ok": False, "backend": "ollama", "missing": [], "message": "Ollama is not running."}
-    return {"ok": not missing, "backend": "ollama", "missing": missing,
-            "message": "ready" if not missing else "missing models: " + ", ".join(missing)}
+    from core.secrets import get_secret
+    names = ["gemini"] if cfg["backend"] == "gemini" else ["groq", "gemini"]
+    configured = [name for name in names if get_secret(name)]
+    return {"ok": bool(configured), "backend": cfg["backend"], "missing": [],
+            "message": "Credentials configured: " + ", ".join(configured) if configured else "Cloud credentials required."}
 
 
 def pull_missing(progress: Callable[[str], None] = print) -> list[str]:
@@ -829,10 +822,10 @@ def _gemini_chat(messages, role, tools, temperature, max_tokens, json_mode):
         if msg.get("images"):
             parts.extend(gt.Part.from_bytes(data=base64.b64decode(image), mime_type="image/png") for image in msg["images"])
         if msg["role"] == "tool":
-            parts = [gt.Part.from_function_response(name=msg["tool_name"], response={"result": text})]
+            parts = [gt.Part.from_function_response(name=msg.get("tool_name") or msg.get("name") or "tool", response={"result": text})]
         for call in msg.get("tool_calls") or []:
             fn = call["function"]
-            parts.append(gt.Part.from_function_call(name=fn["name"], args=fn.get("arguments") or {}))
+            parts.append(gt.Part.from_function_call(name=fn["name"], args=json.loads(fn["arguments"]) if isinstance(fn.get("arguments"), str) else (fn.get("arguments") or {})))
         contents.append(gt.Content(role="model" if msg["role"] == "assistant" else "user", parts=parts))
     config = {"system_instruction": "\n".join(instructions), "temperature": temperature,
               "max_output_tokens": max_tokens}

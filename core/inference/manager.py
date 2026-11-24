@@ -5,8 +5,8 @@ from __future__ import annotations
 
 from typing import Dict, Any, Optional, List
 import logging
+import asyncio
 
-from core.inference.base import InferenceProvider, get_provider_registry
 from core.intelligence.intent import (
     classify_intent,
     assess_complexity,
@@ -29,7 +29,6 @@ class InferenceManager:
         """
         self.model_router = available_models or {}
         self.complexity_analyzer = ComplexityAnalyzer()
-        self.provider_registry = get_provider_registry()
         self._routing_history: list = []
         self._max_history = 50
 
@@ -67,7 +66,7 @@ class InferenceManager:
         self._record_routing(routing_decision)
 
         # Step 4: Get appropriate provider
-        provider = self._get_provider(model or "ollama")
+        from core.llm import chat_raw
 
         # Step 5: Prepare messages
         messages = self._prepare_messages(
@@ -80,8 +79,8 @@ class InferenceManager:
         # Step 6: Execute inference
 
         try:
-            response = await provider.chat(
-                messages,
+            response = await asyncio.to_thread(
+                chat_raw, messages, role=model,
                 tools=tools,
                 temperature=None,
                 max_tokens=None,
@@ -90,7 +89,7 @@ class InferenceManager:
             result = {
                 "status": "completed",
                 "response": response.get("content", ""),
-                "model": model or "ollama",
+                "model": model or "text",
                 "intent": intent,
                 "complexity": complexity,
                 "tool_calls": response.get("tool_calls", []),
@@ -105,7 +104,7 @@ class InferenceManager:
             return {
                 "status": "failed",
                 "response": f"I encountered an error: {str(e)}",
-                "model": model or "ollama",
+                "model": model or "text",
                 "intent": intent,
                 "complexity": complexity,
                 "auto_routed": False,
@@ -126,23 +125,11 @@ class InferenceManager:
         elif intent == Intent.VISION:
             return "vision"
         elif complexity == Complexity.DEEP:
-            return "large"
+            return "planning"
         elif complexity == Complexity.HIGH:
-            return "medium"
+            return "tool"
         else:
             return "text"
-
-    def _get_provider(self, model_name: str) -> InferenceProvider:
-        """Get the appropriate inference provider for a model."""
-        provider = self.provider_registry.get(model_name)
-        if provider:
-            return provider
-
-        from core.inference.ollama import OllamaProvider
-        cfg = load_config()
-        provider = OllamaProvider(cfg)
-        self.provider_registry.register("ollama", provider)
-        return provider
 
     def _prepare_messages(
         self,
@@ -160,7 +147,7 @@ class InferenceManager:
 
         for msg in history[-10:]:
             if isinstance(msg, dict) and "role" in msg and "content" in msg:
-                messages.append(msg)
+                messages.append({**msg, "_local_only": msg.get("_local_only", not load_config().get("share_history_with_cloud", False))})
 
         messages.append({"role": "user", "content": user_query})
 
