@@ -375,3 +375,146 @@ def test_repeated_specialist_write_is_not_dispatched_twice():
     assert specialist.execute("send_email", {}) == "[DONE]"
     assert specialist.execute("send_email", {}).startswith("[UNVERIFIED]")
     assert actions == ["send_email"]
+
+
+def test_workflow_binds_analysis_only_to_literal_presentation_content(monkeypatch):
+    from core.agents.specialist import SpecialistExecutor
+    from core.agents.workflow import Workflow
+    from plugins.ppt_studio import DECLARATION
+
+    monkeypatch.setattr(llm, "chat_raw", lambda *a, **k: {"content": "Drafted notes"})
+    calls = []
+    specialist = SpecialistExecutor(
+        [DECLARATION],
+        lambda name, args: calls.append((name, args)) or "[DONE]",
+    )
+    draft = {"id": "draft", "agent": "reasoning", "instruction": "Write notes"}
+    step = {
+        "id": "save",
+        "agent": "presentations",
+        "tool": "ppt_studio",
+        "depends_on": ["draft"],
+        "arguments": '{"action":"notes","path":"report.pptx","text":{"$result":"draft"}}',
+    }
+    result = Workflow(specialist, None, lambda _: None).execute(
+        {"tasks": [draft, step]}
+    )
+    assert result.startswith("[DONE]"), result
+    assert calls[0][1]["text"] == "Drafted notes"
+    step["arguments"] = '{"action":"notes","path":{"$result":"draft"}}'
+    result = Workflow(specialist, None, lambda _: None).execute(
+        {"tasks": [draft, step]}
+    )
+    assert result.startswith("[FAILED]")
+    assert len(calls) == 1
+
+
+def test_recovery_claim_replays_only_known_reads(tmp_path, monkeypatch):
+    from core.task_manager import TaskManager
+
+    monkeypatch.setattr("core.task_manager._EVENT_LOG", tmp_path / "audit.jsonl")
+    database = tmp_path / "tasks.db"
+    original = TaskManager(database=database)
+    original.start(1, "system_status")
+    original.start(2, "send_email", {"body": "private"})
+    original.start(3, "runtime_status", {"unexpected": "private"})
+    resumed = TaskManager(database=database)
+    assert resumed.claim_recovered_read(2) is None
+    assert resumed.claim_recovered_read(3) is None
+    assert resumed.claim_recovered_read(1) == "system_status"
+    assert resumed.claim_recovered_read(1) is None
+    assert TaskManager(database=database).claim_recovered_read(1) is None
+
+
+def test_recovered_workflow_keeps_completed_actions_and_blocks_uncertain_writes(
+    tmp_path, monkeypatch
+):
+    from core.agents.recovery import WorkflowJournal
+    from core.agents.specialist import SpecialistExecutor
+    from core.agents.workflow import Outcome, Workflow
+    from plugins.ppt_studio import DECLARATION
+
+    monkeypatch.setattr(
+        llm, "chat_raw", lambda *args, **kwargs: {"content": "Independent analysis"}
+    )
+    graph = {
+        "tasks": [
+            {
+                "id": "done",
+                "agent": "presentations",
+                "tool": "ppt_studio",
+                "arguments": '{"action":"notes","path":"private.pptx","text":"first"}',
+            },
+            {
+                "id": "interrupted",
+                "agent": "presentations",
+                "tool": "ppt_studio",
+                "arguments": '{"action":"delete_slide","path":"private.pptx","index":1}',
+            },
+            {
+                "id": "dependent",
+                "agent": "reasoning",
+                "depends_on": ["interrupted"],
+                "instruction": "Report",
+            },
+            {"id": "independent", "agent": "reasoning", "instruction": "Check status"},
+        ]
+    }
+    path = tmp_path / "workflow.db"
+    first = WorkflowJournal(path)
+    identifier = first.create(graph)
+    assert b"private.pptx" not in b"".join(
+        file.read_bytes() for file in tmp_path.glob("workflow.db*")
+    )
+    first.write(
+        running="interrupted",
+        outcomes={"done": Outcome("DONE", "Verified")},
+        status="paused",
+    )
+    second = WorkflowJournal(path)
+    assert identifier in second.recoverable()
+    calls = []
+    specialist = SpecialistExecutor([DECLARATION], lambda *args: calls.append(args))
+    result = Workflow(specialist, None, lambda _: None, second).execute(
+        {}, resume=identifier
+    )
+    assert "Prior side effects are uncertain" in result
+    assert "Independent analysis" in result
+    assert "A dependency did not complete" in result
+    assert calls == []
+    assert identifier not in WorkflowJournal(path).recoverable()
+
+
+def test_workflow_lease_recovers_after_worker_process_exits(tmp_path):
+    import subprocess
+    import sys
+
+    from core.agents.recovery import WorkflowJournal
+
+    path = tmp_path / "workflow.db"
+    child = """
+from core.agents.recovery import WorkflowJournal
+import os
+import sys
+
+journal = WorkflowJournal(sys.argv[1])
+identifier = journal.create({'tasks': []})
+journal.write(running='last_action')
+print(identifier, flush=True)
+os._exit(17)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", child, str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=15,
+    )
+    assert result.returncode == 17, result.stderr
+    identifier = result.stdout.strip()
+    recovery = WorkflowJournal(path)
+    assert recovery.recoverable() == [identifier]
+    assert recovery.claim(identifier)["running"] == "last_action"
+    assert recovery.recoverable() == []
+    with pytest.raises(ValueError, match="already running"):
+        WorkflowJournal(path).claim(identifier)

@@ -129,6 +129,7 @@ _PRIVATE_TOOL_RESULTS = {
     "file_controller",
     "file_processor",
     "excel",
+    "ppt_studio",
     "screen_read",
     "computer_control",
     "computer_settings",

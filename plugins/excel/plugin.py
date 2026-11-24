@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from actions.office_files import convert_pdf, edit_excel_native, edit_open_workbook, libreoffice_path, office_available, permitted, save_verified
 from core.result import done, failed
 
 NAME = "excel"
@@ -32,7 +33,10 @@ DECLARATION = {
     "description": (
         "Excel workbook tool. Actions: inspect, profile, create, append, set_cell, "
         "formula, format, sort, remove_duplicates, summary, chart, recalculate. "
-        "Use one action per call. Existing workbooks are backed up before edits."
+        "Also supports add_sheet, delete_sheet, rename_sheet, copy_sheet, set_range, "
+        "insert_rows, delete_rows, insert_columns, delete_columns, merge, unmerge, style, "
+        "dropdown, conditional_format, table, filter, import_csv, export_csv, copy_values, to_pdf, pivot, dashboard. "
+        "Existing workbooks are backed up before edits."
     ),
     "parameters": {
         "type": "OBJECT",
@@ -49,7 +53,23 @@ DECLARATION = {
             "aggregate": {"type": "STRING", "description": "sum | average | count | min | max"},
             "chart_type": {"type": "STRING", "description": "bar | line | pie"},
             "title": {"type": "STRING", "description": "Sheet, table, or chart title"},
-            "engine": {"type": "STRING", "description": "Optional LibreOffice executable for recalculate"},
+            "engine": {"type": "STRING", "description": "Optional engine name: soffice"},
+            "target_sheet": {"type": "STRING"},
+            "range": {"type": "STRING", "description": "Range such as A1:D10"},
+            "index": {"type": "INTEGER"},
+            "count": {"type": "INTEGER"},
+            "source": {"type": "STRING"},
+            "open_workbook": {"type": "BOOLEAN", "description": "Edit the active desktop Excel workbook after approval, without saving"},
+            "source_sheet": {"type": "STRING"},
+            "source_range": {"type": "STRING"},
+            "destination": {"type": "STRING"},
+            "choices": {"type": "ARRAY", "items": {"type": "STRING"}},
+            "options": {"type": "OBJECT", "properties": {
+                "font": {"type": "STRING"}, "size": {"type": "NUMBER"}, "bold": {"type": "BOOLEAN"},
+                "color": {"type": "STRING"}, "fill": {"type": "STRING"},
+                "border": {"type": "STRING"}, "alignment": {"type": "STRING"},
+                "number_format": {"type": "STRING"},
+            }},
         },
         "required": ["action"],
     },
@@ -73,7 +93,7 @@ def _path(value: Any, *, create: bool = False) -> Path:
     raw = os.path.expandvars(str(value or "")).strip().strip('"')
     if not raw:
         raise ValueError("path is required")
-    path = Path(raw).expanduser().resolve()
+    path = permitted(raw, write=create)
     if path.suffix.lower() not in _EXCEL_EXTS:
         raise ValueError("supported workbook formats are .xlsx and .xlsm")
     if create:
@@ -106,23 +126,17 @@ def _backup(path: Path) -> Path:
 
 def _atomic_save(wb, path: Path, *, is_new: bool = False) -> tuple[Path | None, dict[str, Any]]:
     backup = None if is_new else _backup(path)
-    fd, temp_name = tempfile.mkstemp(prefix=f".{path.stem}-", suffix=path.suffix, dir=path.parent)
-    os.close(fd)
-    temp = Path(temp_name)
-    try:
-        wb.save(temp)
-        check = _workbook(temp)
-        evidence = {"worksheets": check.sheetnames, "bytes": temp.stat().st_size}
-        check.close()
-        if temp.stat().st_size <= 0:
-            raise OSError("saved workbook is empty")
-        os.replace(temp, path)
-        return backup, evidence
-    except Exception:
-        temp.unlink(missing_ok=True)
-        if backup and not path.exists():
-            shutil.copy2(backup, path)
-        raise
+    evidence = {}
+
+    def verify(temporary):
+        check = _workbook(temporary)
+        try:
+            evidence.update(worksheets=check.sheetnames, bytes=temporary.stat().st_size)
+        finally:
+            check.close()
+
+    save_verified(path, wb.save, verify, replace=not is_new)
+    return backup, evidence
 
 
 def _headers(ws) -> tuple[list[str], dict[str, int]]:
@@ -199,6 +213,181 @@ def _style_sheet(ws) -> None:
         ws.column_dimensions[letter].width = min(48, max(12, width + 2))
 
 
+_EXTRA_EDITS = {"add_sheet", "delete_sheet", "rename_sheet", "copy_sheet", "set_range",
+                "insert_rows", "delete_rows", "insert_columns", "delete_columns",
+                "merge", "unmerge", "style", "dropdown", "conditional_format", "table",
+                "filter", "import_csv", "dashboard", "copy_values"}
+
+
+def _check_unlocked(path):
+    if path.with_name("~$" + path.name).exists() or path.with_name(f".~lock.{path.name}#").exists():
+        raise PermissionError("Close the workbook in the spreadsheet application before editing.")
+
+
+def _edit(wb, ws, action, args):
+    from openpyxl.formatting.rule import ColorScaleRule
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.worksheet.datavalidation import DataValidation
+    from openpyxl.worksheet.table import Table, TableStyleInfo
+    from openpyxl.utils.cell import range_boundaries
+
+    if action in {"add_sheet", "rename_sheet", "copy_sheet"}:
+        name = args.get("target_sheet") or args.get("title")
+        if not name or len(name) > 31 or name.casefold() in {n.casefold() for n in wb.sheetnames}:
+            raise ValueError("Choose a unique worksheet name of at most 31 characters.")
+        if action == "add_sheet":
+            wb.create_sheet(name)
+        elif action == "rename_sheet":
+            ws.title = name
+        else:
+            wb.copy_worksheet(ws).title = name
+        return
+
+    if action == "delete_sheet":
+        if sum(sheet.sheet_state == "visible" for sheet in wb) <= 1 and ws.sheet_state == "visible":
+            raise ValueError("At least one visible worksheet is required.")
+        wb.remove(ws)
+        return
+
+    if action in {"insert_rows", "delete_rows", "insert_columns", "delete_columns"}:
+        index, count = int(args.get("index", 0)), int(args.get("count", 1))
+        limit = 16_384 if action.endswith("columns") else _MAX_ROWS
+        if not 1 <= index <= limit or not 1 <= count <= limit - index + 1:
+            raise ValueError("Invalid row or column index/count.")
+        method = action.replace("columns", "cols")
+        getattr(ws, method)(index, count)
+        return
+
+    if action == "dashboard":
+        from openpyxl.chart import BarChart, Reference
+
+        group = _column(ws, args.get("group_by"))
+        measure = _column(ws, args.get("column"))
+        name = args.get("title") or "Dashboard"
+        if name in wb.sheetnames:
+            raise ValueError("Choose a new dashboard sheet name.")
+        totals = {}
+        for row in _data_rows(ws):
+            value = row[measure - 1]
+            if isinstance(value, (float, int)) and not isinstance(value, bool):
+                category = str(row[group - 1] or "(blank)")
+                totals[category] = totals.get(category, 0) + value
+        if not totals:
+            raise ValueError("The dashboard measure has no numeric values.")
+        dashboard = wb.create_sheet(name)
+        dashboard.append([ws.cell(1, group).value, "Total"])
+        for key, value in sorted(totals.items(), key=lambda item: item[1], reverse=True):
+            dashboard.append([key, value])
+            dashboard.cell(dashboard.max_row, 1).data_type = "s"
+        chart = BarChart()
+        chart.title = name
+        chart.add_data(Reference(dashboard, min_col=2, min_row=1, max_row=dashboard.max_row), titles_from_data=True)
+        chart.set_categories(Reference(dashboard, min_col=1, min_row=2, max_row=dashboard.max_row))
+        dashboard.add_chart(chart, "D2")
+        _style_sheet(dashboard)
+        return
+
+    if action == "import_csv":
+        with permitted(args["source"]).open(encoding="utf-8-sig", newline="") as stream:
+            for index, row in enumerate(csv.reader(stream), start=ws.max_row + 1):
+                if index > _MAX_ROWS:
+                    raise ValueError("CSV exceeds worksheet row limit.")
+                ws.append(row)
+                # CSV import treats external values literally, including leading '='.
+                for cell in ws[index]:
+                    cell.data_type = "s"
+        return
+
+    cell_range = args.get("range") or args.get("cell")
+    if not cell_range:
+        raise ValueError("Provide a cell or a range.")
+    left, top, right, bottom = range_boundaries(cell_range)
+    if not all((left, top, right, bottom)) or not (
+        1 <= left <= right <= 16_384 and 1 <= top <= bottom <= _MAX_ROWS
+        and (right - left + 1) * (bottom - top + 1) <= 100_000
+    ):
+        raise ValueError("Invalid or excessive cell range.")
+
+    if action in {"set_range", "copy_values"}:
+        data = args.get("data") or []
+        if action == "copy_values":
+            source = permitted(args["source"])
+            if source.suffix.lower() not in _EXCEL_EXTS:
+                raise ValueError("Source must be an Excel workbook.")
+            source_left, source_top, source_right, source_bottom = range_boundaries(args["source_range"])
+            if (not all((source_left, source_top, source_right, source_bottom))
+                    or source_right - source_left != right - left
+                    or source_bottom - source_top != bottom - top):
+                raise ValueError("Source and destination ranges must have matching dimensions.")
+            if not 1 <= source_left <= source_right <= 16_384 or not 1 <= source_top <= source_bottom <= _MAX_ROWS:
+                raise ValueError("Source range exceeds the supported worksheet bounds.")
+            workbook = _openpyxl().load_workbook(source, data_only=True, read_only=True)
+            try:
+                data = [list(row) for row in _sheet(workbook, args.get("source_sheet")).iter_rows(
+                    min_row=source_top, max_row=source_bottom, min_col=source_left, max_col=source_right, values_only=True,
+                )]
+            finally:
+                workbook.close()
+        if len(data) != bottom - top + 1 or any(
+            not isinstance(row, list) or len(row) != right - left + 1 for row in data
+        ):
+            raise ValueError("Data dimensions must match the target range.")
+        for i, row in enumerate(data, top):
+            for j, value in enumerate(row, left):
+                target = ws.cell(i, j)
+                target.value = value
+                if action == "copy_values" and isinstance(value, str):
+                    target.data_type = "s"
+    elif action == "merge":
+        ws.merge_cells(cell_range)
+    elif action == "unmerge":
+        ws.unmerge_cells(cell_range)
+    elif action == "filter":
+        ws.auto_filter.ref = cell_range
+    elif action == "table":
+        title = args.get("title") or "MarkTable"
+        if top == bottom or any(not isinstance(ws.cell(top, j).value, str) or not ws.cell(top, j).value
+                                for j in range(left, right + 1)):
+            raise ValueError("Tables require text headings and at least one data row.")
+        table = Table(displayName=title, ref=cell_range)
+        table.tableStyleInfo = TableStyleInfo(name="TableStyleMedium9", showRowStripes=True)
+        ws.add_table(table)
+    elif action == "conditional_format":
+        ws.conditional_formatting.add(cell_range, ColorScaleRule(
+            start_type="min", start_color="F8696B", end_type="max", end_color="63BE7B",
+        ))
+    elif action == "dropdown":
+        choices = args.get("choices") or []
+        encoded = ",".join(choices)
+        if not choices or len(encoded) > 250 or any(
+            not option or any(character in option for character in (",", '"', "\r", "\n"))
+            for option in choices
+        ):
+            raise ValueError("Provide literal dropdown options totalling at most 250 characters.")
+        validation = DataValidation(type="list", formula1=f'"{encoded}"', showErrorMessage=True)
+        ws.add_data_validation(validation)
+        validation.add(cell_range)
+    elif action == "style":
+        from copy import copy
+        options = args.get("options") or {}
+        for row in ws.iter_rows(min_row=top, max_row=bottom, min_col=left, max_col=right):
+            for cell in row:
+                font = copy(cell.font)
+                for key, attribute in (("font", "name"), ("size", "size"), ("bold", "bold"), ("color", "color")):
+                    if key in options:
+                        setattr(font, attribute, options[key])
+                cell.font = font
+                if "fill" in options:
+                    cell.fill = PatternFill("solid", fgColor=options["fill"])
+                if "border" in options:
+                    side = Side(style="thin", color=options["border"])
+                    cell.border = Border(left=side, right=side, top=side, bottom=side)
+                if "alignment" in options:
+                    cell.alignment = Alignment(horizontal=options["alignment"])
+                if "number_format" in options:
+                    cell.number_format = options["number_format"]
+
+
 def _mutate(args: dict[str, Any]):
     action = str(args.get("action", "")).strip().lower()
     path = _path(args.get("path"), create=action == "create")
@@ -206,6 +395,7 @@ def _mutate(args: dict[str, Any]):
     allowed, reason = check_path(path, write=True)
     if not allowed:
         raise PermissionError(reason)
+    _check_unlocked(path)
     openpyxl = _openpyxl()
     is_new = action == "create"
     if is_new:
@@ -225,7 +415,9 @@ def _mutate(args: dict[str, Any]):
         ws = _sheet(wb, args.get("sheet"))
     backup = None
     try:
-        if action == "append":
+        if action in _EXTRA_EDITS:
+            _edit(wb, ws, action, args)
+        elif action == "append":
             rows = args.get("data") or []
             if not isinstance(rows, list) or not rows:
                 raise ValueError("append requires data as a non-empty list of rows")
@@ -326,6 +518,60 @@ def _mutate(args: dict[str, Any]):
         wb.close()
 
 
+def _native_workbook_operation(path, settings):
+    _check_unlocked(path)
+    backup = _backup(path)
+
+    def edit(temporary):
+        shutil.copyfile(path, temporary)
+        edit_excel_native(temporary, settings)
+
+    def verify(temporary):
+        workbook = _workbook(temporary)
+        try:
+            if settings["action"] == "pivot" and not workbook[settings["title"]]._pivots:
+                raise ValueError("Excel did not save a native pivot table.")
+        finally:
+            workbook.close()
+
+    save_verified(path, edit, verify, replace=True)
+    return backup
+
+
+def _pivot(args):
+    path = _path(args.get("path"))
+    permitted(path, write=True)
+    if not office_available("Excel.Application"):
+        return failed("Microsoft Excel is required for native pivot tables", "Use summary for a local grouped table.")
+    from openpyxl.utils.cell import range_boundaries
+
+    cell_range = args.get("range")
+    if not cell_range or any(not value for value in range_boundaries(cell_range)):
+        raise ValueError("Specify a bounded source range including column headings.")
+    workbook = _workbook(path)
+    try:
+        sheet = _sheet(workbook, args.get("sheet"))
+        title = args.get("title") or "Pivot"
+        if title in workbook.sheetnames or not 1 <= len(title) <= 31 or re.search(r"[\[\]*?/\\:]", title):
+            raise ValueError("Choose a valid new worksheet name.")
+        left, top, right, bottom = range_boundaries(cell_range)
+        if top >= bottom or bottom > sheet.max_row or right > sheet.max_column:
+            raise ValueError("The specified source range has no complete data rows.")
+        headers = {sheet.cell(top, col).value for col in range(left, right + 1)}
+        if not {args.get("group_by"), args.get("column")} <= headers:
+            raise ValueError("Pivot fields must match the source headers.")
+        aggregate = args.get("aggregate", "sum")
+        if aggregate not in {"sum", "count", "average", "min", "max"}:
+            raise ValueError("Unsupported pivot aggregation.")
+        settings = {"action": "pivot", "sheet": sheet.title, "range": cell_range,
+                    "title": title, "group_by": args["group_by"], "column": args["column"],
+                    "aggregate": aggregate}
+    finally:
+        workbook.close()
+    backup = _native_workbook_operation(path, settings)
+    return done(f"Created native pivot table in {title}", evidence=f"Backup: {backup.name}")
+
+
 def _recalculate(args: dict[str, Any]):
     import subprocess
     path = _path(args.get("path"))
@@ -333,8 +579,14 @@ def _recalculate(args: dict[str, Any]):
     allowed, reason = check_path(path, write=True)
     if not allowed:
         return failed("Workbook path is not approved for writing", reason)
+    _check_unlocked(path)
+    if not args.get("engine") and office_available("Excel.Application"):
+        backup = _native_workbook_operation(path, {"action": "recalculate"})
+        return done(f"Recalculated {path.name} in Excel", evidence=f"Backup: {backup.name}")
     engine = str(args.get("engine") or "soffice")
-    exe = shutil.which(engine)
+    if engine not in {"soffice", "libreoffice"}:
+        return failed("Unsupported spreadsheet recalculation engine", "Choose soffice or libreoffice.")
+    exe = shutil.which(engine) or libreoffice_path()
     if not exe:
         return failed("Spreadsheet recalculation engine is not installed", f"Install LibreOffice or provide engine path; formula values were not changed: {path.name}")
     backup = _backup(path)
@@ -346,7 +598,7 @@ def _recalculate(args: dict[str, Any]):
             if result.returncode != 0 or not converted.is_file() or converted.stat().st_size == 0:
                 return failed("Workbook recalculation failed", (result.stderr or result.stdout or "No output from LibreOffice")[:1000])
             _workbook(converted).close()
-            os.replace(converted, path)
+            save_verified(path, lambda p: shutil.copyfile(converted, p), lambda p: _workbook(p).close(), replace=True)
         except subprocess.TimeoutExpired:
             return failed("Workbook recalculation timed out", f"The workbook remains unchanged; backup: {backup.name}")
         except Exception as exc:
@@ -354,17 +606,74 @@ def _recalculate(args: dict[str, Any]):
     return done(f"Recalculated {path.name}", evidence=json.dumps({"backup": backup.name, "engine": Path(exe).name}))
 
 
+def _edit_open(args, action):
+    from openpyxl.utils.cell import range_boundaries
+
+    if action not in {"set_cell", "formula", "set_range"}:
+        raise ValueError("Open workbook editing supports set_cell, formula, and set_range.")
+    if not office_available("Excel.Application"):
+        raise RuntimeError("Open workbook editing needs desktop Microsoft Excel.")
+    path = permitted(_path(args.get("path")), write=True)
+    address = args.get("range") if action == "set_range" else args.get("cell")
+    if not address or not re.fullmatch(r"[A-Z]{1,3}[1-9][0-9]*(?::[A-Z]{1,3}[1-9][0-9]*)?", address.upper()):
+        raise ValueError("A bounded Excel address is required.")
+    left, top, right, bottom = range_boundaries(address)
+    if not (1 <= left <= right <= 16_384 and 1 <= top <= bottom <= _MAX_ROWS
+            and (right - left + 1) * (bottom - top + 1) <= 1000):
+        raise ValueError("The range is invalid or too large.")
+    if action == "set_range":
+        rows = args.get("data") or []
+        if len(rows) != bottom - top + 1 or any(
+            not isinstance(row, list) or len(row) != right - left + 1 for row in rows
+        ):
+            raise ValueError("Data dimensions must match the target range.")
+        values = tuple(tuple(row) for row in rows)
+        if len(values) == 1 and len(values[0]) == 1:
+            values = values[0][0]
+    else:
+        if left != right or top != bottom:
+            raise ValueError("This action requires a single cell.")
+        values = args.get("value")
+        if action == "formula" and values and not str(values).startswith("="):
+            values = "=" + str(values)
+    edit_open_workbook(path, args.get("sheet"), address, values)
+    return done(f"Updated {path.name} in the open Excel session",
+                evidence="Cell values verified in Excel. The workbook remains open with unsaved edits.")
+
+
 def run(args: dict[str, Any], ctx):
     action = str(args.get("action", "inspect")).strip().lower()
     try:
+        if args.get("open_workbook"):
+            return _edit_open(args, action)
         if action == "recalculate":
             return _recalculate(args)
+        if action == "pivot":
+            return _pivot(args)
+        if action in {"export_csv", "to_pdf"}:
+            path = _path(args.get("path"))
+            if action == "to_pdf":
+                convert_pdf(path, args.get("destination") or path.with_suffix(".pdf"))
+            else:
+                wb = _workbook(path)
+                try:
+                    ws = _sheet(wb, args.get("sheet"))
+
+                    def export(temporary):
+                        with temporary.open("w", encoding="utf-8-sig", newline="") as stream:
+                            csv.writer(stream).writerows(ws.values)
+
+                    save_verified(args.get("destination") or path.with_suffix(".csv"), export,
+                                  lambda p: p.stat())
+                finally:
+                    wb.close()
+            return done(f"Exported {path.name}")
         if action in {"inspect", "profile"}:
             path = _path(args.get("path"))
             info = _inspect(path) if action == "inspect" else _profile(path, args.get("sheet"))
             label = "Inspected" if action == "inspect" else "Profiled"
             return done(f"{label} {path.name}", evidence=json.dumps(info, ensure_ascii=False, default=str))
-        if action not in {"create", "append", "set_cell", "formula", "format", "sort", "remove_duplicates", "summary", "chart"}:
+        if action not in _EXTRA_EDITS | {"create", "append", "set_cell", "formula", "format", "sort", "remove_duplicates", "summary", "chart"}:
             return failed("Unknown Excel action", "use inspect, profile, create, append, set_cell, formula, format, sort, remove_duplicates, summary, chart, or recalculate")
         path, backup, evidence = _mutate(args)
         evidence["backup"] = backup.name if backup else None

@@ -77,7 +77,7 @@ def check(path: str | Path, write: bool = False) -> tuple[bool, str]:
         target in protected_files
         or any(_inside(target, _norm(BASE_DIR / part)) for part in ("memory/identity", "data/calls"))
         or (_inside(target, _norm(BASE_DIR / "data"))
-            and Path(target).name.startswith(("mark.db", "tasks.db", "cloud_usage.db")))
+            and Path(target).name.startswith(("mark.db", "tasks.db", "cloud_usage.db", "workflows.db", "workflows.key")))
         or (_inside(target, _norm(BASE_DIR)) and Path(target).name in {".env", "runtime.env"})
     ):
         return False, "Access to MARK credentials and private runtime data is restricted."

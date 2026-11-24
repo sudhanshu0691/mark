@@ -8,7 +8,7 @@ from vision_department.detection.model_loader import class_names, load_model
 
 
 def test_supplied_checkpoint_loads_and_exposes_real_classes():
-    checkpoint = ROOT / "human.pt"
+    checkpoint = ROOT / "assets" / "models" / "human.pt"
     if not checkpoint.exists():
         pytest.skip("supplied project checkpoint is not present")
     model = load_model(checkpoint, "cpu")
@@ -58,8 +58,14 @@ def test_missing_model_fails_before_inference(tmp_path):
 
 def test_config_uses_supplied_model_and_safe_defaults():
     settings = VisionSettings.load()
-    assert settings.model_path == (ROOT / "human.pt").resolve()
+    assert settings.model_path == (ROOT / "assets" / "models" / "human.pt").resolve()
     assert settings.confidence == 0.45
     assert settings.interval_seconds == 1.0
     assert settings.alert_cooldown_seconds == 30.0
     assert settings.recording_enabled is False
+
+
+def test_config_resolves_legacy_model_path_after_reorganization(tmp_path):
+    config = tmp_path / "vision.yaml"
+    config.write_text("model:\n  path: human.pt\n", encoding="utf-8")
+    assert VisionSettings.load(config).model_path == VisionSettings().model_path

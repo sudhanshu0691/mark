@@ -62,6 +62,13 @@ def init_db() -> None:
                 updated TEXT NOT NULL,
                 UNIQUE(category, key)
             );
+            CREATE TABLE IF NOT EXISTS preference_observations (
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                evidence TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                PRIMARY KEY(key, value, evidence)
+            );
             CREATE TABLE IF NOT EXISTS sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 date TEXT NOT NULL,
@@ -105,6 +112,30 @@ def init_db() -> None:
                 conn.execute("ALTER TABLE memory_facts ADD COLUMN source TEXT NOT NULL DEFAULT 'legacy'")
             if "confidence" not in facts_columns:
                 conn.execute("ALTER TABLE memory_facts ADD COLUMN confidence REAL")
+            conn.executescript("""
+            CREATE TABLE IF NOT EXISTS fact_revisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
+                source TEXT NOT NULL, updated TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_fact_revisions ON fact_revisions(category,key,id);
+            CREATE TRIGGER IF NOT EXISTS revise_fact
+            AFTER UPDATE OF value ON memory_facts
+            WHEN OLD.value <> NEW.value
+            BEGIN
+                INSERT INTO fact_revisions(category,key,value,source,updated)
+                VALUES (OLD.category,OLD.key,OLD.value,OLD.source,OLD.updated);
+                DELETE FROM fact_revisions WHERE id IN (
+                    SELECT id FROM fact_revisions WHERE category=OLD.category AND key=OLD.key
+                    ORDER BY id DESC LIMIT -1 OFFSET 8
+                );
+            END;
+            CREATE TRIGGER IF NOT EXISTS forget_fact_history
+            AFTER DELETE ON memory_facts
+            BEGIN
+                DELETE FROM fact_revisions WHERE category=OLD.category AND key=OLD.key;
+            END;
+            """)
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_turn_request ON conversation_turns(request_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_turns_conversation_id ON conversation_turns(conversation_id, id)")
             _ensure_default_conversation(conn)
@@ -433,7 +464,8 @@ def save_memory_dict(memory: dict) -> None:
     with _lock:
         conn = _connect()
         try:
-            conn.execute("DELETE FROM memory_facts")
+            previous = set(conn.execute("SELECT category,key FROM memory_facts"))
+            retained = set()
             conn.execute("DELETE FROM sessions")
             for cat in CATEGORIES:
                 items = memory.get(cat, {}) if isinstance(memory, dict) else {}
@@ -444,13 +476,16 @@ def save_memory_dict(memory: dict) -> None:
                     if not val:
                         continue
                     updated = entry.get("updated") if isinstance(entry, dict) else None
+                    retained.add((cat, str(key)))
                     conn.execute(
-                        "INSERT OR REPLACE INTO memory_facts(category,key,value,updated,source,confidence) "
-                        "VALUES (?,?,?,?,?,?)",
+                        "INSERT INTO memory_facts(category,key,value,updated,source,confidence) "
+                        "VALUES (?,?,?,?,?,?) ON CONFLICT(category,key) DO UPDATE SET "
+                        "value=excluded.value,updated=excluded.updated,source=excluded.source,confidence=excluded.confidence",
                         (cat, str(key), str(val)[:380], str(updated or _dt.datetime.now().strftime("%Y-%m-%d")),
                          entry.get("source", "legacy") if isinstance(entry, dict) else "legacy",
                          entry.get("confidence") if isinstance(entry, dict) else None),
                     )
+            conn.executemany("DELETE FROM memory_facts WHERE category=? AND key=?", previous - retained)
             sessions = memory.get("sessions", []) if isinstance(memory, dict) else []
             if isinstance(sessions, list):
                 for s in sessions[-3:]:
@@ -503,8 +538,49 @@ def upsert_fact(category, key, value, *, source="local"):
                 (category, key, value, datetime.now().isoformat(timespec="seconds"), source,
                  1.0 if source in {"user_explicit", "user_confirmed"} else None),
             )
+            if category == "preferences":
+                conn.execute("DELETE FROM preference_observations WHERE key=?", (key,))
             conn.commit()
             return cur.rowcount > 0
+        finally:
+            conn.close()
+
+
+def observe_preference(key, value, evidence):
+    """Corroborate whitelisted observations in one transaction."""
+    init_db()
+    now = datetime.now().isoformat(timespec="seconds")
+    with _lock:
+        conn = _connect()
+        try:
+            with conn:
+                existing = conn.execute(
+                    "SELECT value FROM memory_facts WHERE category='preferences' AND key=?", (key,),
+                ).fetchone()
+                if existing:
+                    return "duplicate" if existing[0] == value else "contradiction"
+                conn.execute(
+                    "DELETE FROM preference_observations WHERE observed_at < datetime('now', '-60 days')",
+                )
+                conn.execute(
+                    "INSERT OR IGNORE INTO preference_observations VALUES (?,?,?,?)",
+                    (key, value, evidence, now),
+                )
+                variants = conn.execute(
+                    "SELECT value, count(*) FROM preference_observations WHERE key=? GROUP BY value",
+                    (key,),
+                ).fetchall()
+                if len(variants) > 1:
+                    return "contradiction"
+                if variants[0][1] < 2:
+                    return "provisional"
+                conn.execute(
+                    "INSERT INTO memory_facts(category,key,value,updated,source,confidence) "
+                    "VALUES ('preferences',?,?,?,'observed_user_preference',0.8)",
+                    (key, value, now),
+                )
+                conn.execute("DELETE FROM preference_observations WHERE key=?", (key,))
+                return "saved"
         finally:
             conn.close()
 
@@ -515,10 +591,24 @@ def delete_fact(category, key):
         conn = _connect()
         try:
             cur = conn.execute("DELETE FROM memory_facts WHERE category=? AND key=?", (category, key))
+            if category == "preferences":
+                conn.execute("DELETE FROM preference_observations WHERE key=?", (key,))
             conn.commit()
             return cur.rowcount > 0
         finally:
             conn.close()
+
+
+def fact_history(category, key):
+    """Return prior values for deliberate local review."""
+    from contextlib import closing
+
+    init_db()
+    with _lock, closing(_connect()) as conn:
+        return conn.execute(
+            "SELECT value,source,updated FROM fact_revisions "
+            "WHERE category=? AND key=? ORDER BY id DESC", (category, key),
+        ).fetchall()
 
 
 def save_session_summary(summary, language=""):

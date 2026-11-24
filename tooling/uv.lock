@@ -1311,6 +1311,7 @@ version = "1.0.0"
 source = { virtual = "." }
 dependencies = [
     { name = "comtypes", marker = "sys_platform == 'win32'" },
+    { name = "cryptography" },
     { name = "ddgs" },
     { name = "edge-tts" },
     { name = "ezdxf" },
@@ -1336,6 +1337,7 @@ dependencies = [
     { name = "pydub" },
     { name = "pygetwindow" },
     { name = "pypdf" },
+    { name = "pypdfium2" },
     { name = "pyperclip" },
     { name = "pyside6" },
     { name = "pytesseract" },
@@ -1380,6 +1382,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "comtypes", marker = "sys_platform == 'win32'" },
+    { name = "cryptography", specifier = ">=46" },
     { name = "ddgs" },
     { name = "dill", marker = "extra == 'vision'", specifier = ">=0.3.8,<1" },
     { name = "edge-tts" },
@@ -1408,6 +1411,7 @@ requires-dist = [
     { name = "pydub" },
     { name = "pygetwindow" },
     { name = "pypdf", specifier = ">=7.1.1,<8" },
+    { name = "pypdfium2", specifier = ">=5.14,<6" },
     { name = "pyperclip" },
     { name = "pyside6", specifier = ">=6.7" },
     { name = "pytesseract" },

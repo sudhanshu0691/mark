@@ -13,6 +13,8 @@ from typing import Any, Callable
 
 from core.agents import for_tool
 
+_REPLAYABLE_TOOLS = frozenset({"system_status", "runtime_status"})
+
 _EVENT_LOG = Path(__file__).resolve().parent.parent / "data" / "tasks.jsonl"
 
 
@@ -206,6 +208,22 @@ class TaskManager:
     def is_cancelled(self, task_id: str | int) -> bool:
         with self._lock:
             return str(task_id) in self._cancelled
+
+    def claim_recovered_read(self, task_id):
+        """Consume a recovered checkpoint for a known argument-free read."""
+        with self._lock:
+            self._restore()
+            row = self._rows.get(str(task_id))
+            if (not row or not row.get("recovered") or row.get("resume_claimed")
+                    or row["tool"] not in _REPLAYABLE_TOOLS
+                    or row.get("argument_names") or row.get("approval_required")):
+                return None
+            row["resume_claimed"] = True
+            row["updated_at"] = time.time()
+            self._persist(row)
+            tool = row["tool"]
+        self._record({"event": "recovered_read_claimed", "id": str(task_id), "tool": tool})
+        return tool
 
     def recent(self, limit: int = 50) -> list[dict]:
         with self._lock:

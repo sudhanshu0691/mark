@@ -26,7 +26,7 @@ RISK_MAP = {
     "window_manager": {"*": WRITE},
     "code_helper": {"*": WRITE},
     "dev_agent": {"*": WRITE},
-    "file_processor": {"*": WRITE},
+    "file_processor": {"run": EXTERNAL, "*": WRITE},
 }
 
 # Discrete operations required for the deterministic local route.
@@ -82,6 +82,10 @@ RISK_MAP["browser_control"].update(dict.fromkeys(
      "get_text", "get_url", "reload", "screenshot"), LOW))
 RISK_MAP["excel"].update(dict.fromkeys(
     ("create", "append", "set_cell", "formula", "format", "sort", "summary", "chart", "recalculate"), MEDIUM))
+RISK_MAP["excel"].update(dict.fromkeys(
+    ("export_csv", "to_pdf", "add_sheet", "copy_sheet", "rename_sheet", "set_range", "merge",
+     "unmerge", "style", "dropdown", "conditional_format", "table", "filter", "import_csv",
+     "insert_rows", "insert_columns", "dashboard", "pivot", "copy_values"), MEDIUM))
 RISK_MAP["excel"]["remove_duplicates"] = HIGH
 RISK_MAP["computer_settings"].update(dict.fromkeys(
     ("empty_recycle_bin", "empty_trash", "log_off", "logout", "sign_out", "hibernate",
@@ -99,6 +103,8 @@ def classify(tool: str, args: dict | None = None) -> str:
     args = args or {}
     cfg = RISK_MAP.get(tool, {})
     action = str(args.get("action") or args.get("mode") or "*").strip().lower().replace("-", "_").replace(" ", "_")
+    if tool == "excel" and args.get("open_workbook") is True:
+        return EXTERNAL
     if tool == "computer_control" and action == "press":
         return LOW if str(args.get("key", "")).strip().lower() in _NAV_KEYS else HIGH
     if tool == "computer_control" and action == "hotkey":

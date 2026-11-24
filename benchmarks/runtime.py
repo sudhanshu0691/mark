@@ -36,7 +36,37 @@ def sentence_buffer():
     buffer.flush()
 
 
+def stability(work, seconds):
+    import psutil
+
+    process = psutil.Process()
+    started = time.monotonic()
+    initial = process.memory_info().rss
+    peak = initial
+    iterations = 0
+    while time.monotonic() - started < seconds:
+        work()
+        iterations += 1
+        if iterations % 25 == 0:
+            peak = max(peak, process.memory_info().rss)
+    final = process.memory_info().rss
+    return {
+        "duration_s": round(time.monotonic() - started, 2),
+        "iterations": iterations,
+        "baseline_rss_bytes": initial,
+        "peak_sampled_rss_bytes": max(peak, final),
+        "ending_rss_bytes": final,
+    }
+
+
 def main():
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--stability-seconds", type=int, default=5)
+    options = parser.parse_args()
+    if not 0 <= options.stability_seconds <= 3600:
+        parser.error("stability duration must be between zero and 3600 seconds")
     payload = [{"role": "user", "content": "password=example123"}]
     with tempfile.TemporaryDirectory(prefix="mark-bench-") as tmp:
         root = Path(tmp)
@@ -80,6 +110,16 @@ def main():
                     job.result() for job in [pool.submit(retrieve) for _ in range(4)]
                 ],
                 100,
+            )
+
+        def mixed():
+            write()
+            retrieve()
+            dispatch()
+
+        if options.stability_seconds:
+            results["stability_local_memory_and_dispatch"] = stability(
+                mixed, options.stability_seconds
             )
     print(json.dumps(results, indent=2))
 

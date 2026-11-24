@@ -1,9 +1,9 @@
 # MARK setup — installs declared dependencies and checks available features.
 #
 # Usage:
-#   python setup.py                 (inside a venv is best, plain python also works)
+#   python -m tooling.setup                 (inside a venv is best, plain python also works)
 #   setup_windows.bat               (one-click: creates venv + calls this file)
-#   python setup.py --doctor        (diagnose only: no installs, prints a health report)
+#   python -m tooling.setup --doctor        (diagnose only: no installs, prints a health report)
 import argparse
 import importlib
 import subprocess
@@ -12,7 +12,8 @@ import platform
 import json
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
+TOOLING_DIR = Path(__file__).resolve().parent
+ROOT = TOOLING_DIR.parent
 IS_WIN = platform.system() == "Windows"
 
 # module import name -> (friendly name, is_optional)
@@ -35,6 +36,8 @@ WANT = [
     ("pyperclip", "clipboard", False),
     ("pptx", "PowerPoint (ppt_studio)", False),
     ("docx", "Word", False),
+    ("pypdf", "PDF editing", False),
+    ("pypdfium2", "PDF page rendering", False),
     ("pydub", "audio editing", True),
     ("playwright", "browser automation", True),
     ("pytesseract", "OCR binding", True),
@@ -80,7 +83,7 @@ def pip_install(exe, reqs: Path) -> tuple[bool, str]:
     r = _run(exe, "-m", "pip", "install", "--upgrade", "pip")
     if r.returncode != 0:
         return False, f"pip upgrade failed (exit {r.returncode})"
-    constraints = ["-c", str(HERE / "constraints-windows-py311.txt")] if IS_WIN and sys.version_info[:2] == (3, 11) else []
+    constraints = ["-c", str(TOOLING_DIR / "constraints-windows-py311.txt")] if IS_WIN and sys.version_info[:2] == (3, 11) else []
     r = _run(exe, "-m", "pip", "install", *constraints, "-r", str(reqs))
     if r.returncode != 0:
         return False, (
@@ -107,6 +110,47 @@ def verify() -> tuple[list[str], list[str]]:
     return req, opt
 
 
+def report_capabilities():
+    import shutil
+    import sqlite3
+
+    from actions.office_files import OFFICE_APPS, libreoffice_path, office_available
+
+    for program in sorted(set(OFFICE_APPS.values())):
+        print(f"{program}: {'registered' if office_available(program) else 'optional, not detected'}")
+    for label, available in (
+        ("LibreOffice", libreoffice_path()), ("Tesseract OCR", shutil.which("tesseract")),
+        ("FFmpeg", shutil.which("ffmpeg")),
+    ):
+        print(f"{label}: {'found' if available else 'optional, not detected'}")
+    try:
+        import sounddevice
+        devices = sounddevice.query_devices()
+        inputs = sum(item["max_input_channels"] > 0 for item in devices)
+        outputs = sum(item["max_output_channels"] > 0 for item in devices)
+        print(f"Audio devices: {inputs} input, {outputs} output")
+    except Exception as exc:
+        print(f"Audio discovery unavailable ({type(exc).__name__})")
+    try:
+        import mss
+        with mss.MSS() as capture:
+            print(f"Displays detected: {max(0, len(capture.monitors) - 1)}")
+    except Exception as exc:
+        print(f"Display discovery unavailable ({type(exc).__name__})")
+    with sqlite3.connect(":memory:") as database:
+        try:
+            database.execute("CREATE VIRTUAL TABLE test USING fts5(value)")
+            print("SQLite memory: FTS5 available")
+        except sqlite3.Error:
+            print("SQLite memory: fallback retrieval available")
+    try:
+        from core.secrets import get_secret
+        for provider in ("groq", "gemini"):
+            print(f"{provider.title()} credential: {'configured' if get_secret(provider) else 'not configured'}")
+    except Exception as exc:
+        print(f"Credential store could not be queried ({type(exc).__name__})")
+
+
 def doctor() -> int:
     print("=== MARK preflight ===")
     print(f"python: {sys.version.split()[0]}  exe: {sys.executable}")
@@ -123,10 +167,14 @@ def doctor() -> int:
         print("\nMissing OPTIONAL features (MARK will report these capabilities unavailable):")
         for m in opt:
             print(f"  ? {m}")
-    cfg = HERE / "config"
+    cfg = ROOT / "config"
     print(f"\nconfig/api_keys.json: {'legacy profile present' if (cfg / 'api_keys.json').exists() else 'optional; OS credential store is preferred'}")
-    print(f"plugins/: {len(list((HERE / 'plugins').glob('*.py')))} python files")
-    return 0 if not req else 1
+    print(f"plugins/: {len(list((ROOT / 'plugins').glob('*.py')))} python files")
+    report_capabilities()
+    supported = (3, 11) <= sys.version_info[:2] < (3, 13) and sys.maxsize > 2**32
+    if not supported:
+        print("MARK requires 64-bit Python 3.11 or 3.12.")
+    return 0 if not req and supported else 1
 
 
 def test_gemini() -> int:
@@ -194,7 +242,7 @@ def main() -> int:
 
     if not args.dependencies_ready:
         print("Installing requirements...")
-        ok, why = pip_install(sys.executable, HERE / "requirements.txt")
+        ok, why = pip_install(sys.executable, ROOT / "requirements.txt")
         if not ok:
             print(f"\nINSTALL FAILED:\n{why}")
             return 1

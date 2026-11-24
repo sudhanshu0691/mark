@@ -1,100 +1,57 @@
-"""Voice Activity Detection module for MARK using Silero VAD.
+"""Local PCM speech endpointing with adaptive noise floor and pre-roll."""
 
-Provides local voice activity detection for the LiveKit conversational pipeline.
+from collections import deque
 
-Key design:
-- Uses Silero VAD through LiveKit plugins
-- Implements speech start/end detection with configurable thresholds
-- Based on local VAD-based endpointing (not cloud-backed or metered)
-- Supports false activation handling and interruption detection
-- Configurable silence thresholds for endpointing
-"""
-
-from __future__ import annotations
-
-import asyncio
-import logging
-from typing import Any, Optional, Tuple
-
-logger = logging.getLogger(__name__)
+import numpy as np
 
 
-class SileroVAD:
-    """Silero VAD implementation for speech start/end detection.
+class VoiceActivityDetector:
+    """Accept mono signed PCM and emit one bounded utterance after a pause."""
 
-    Uses the Silero VAD model for local voice activity detection,
-    integrated through the LiveKit plugin system.
-    """
+    def __init__(self, sample_rate=16_000):
+        self.bytes_per_second = sample_rate * 2
+        self.pre_roll = deque()
+        self.pre_roll_size = 0
+        self.utterance = bytearray()
+        self.noise = 100.0
+        self.attack = 0
+        self.silence = 0
 
-    def __init__(
-        self,
-        silence_threshold: float = 0.5,
-        speech_threshold: float = 0.9,
-        sample_rate: int = 16000,
-    ):
-        self.silence_threshold = silence_threshold
-        self.speech_threshold = speech_threshold
-        self.sample_rate = sample_rate
-        self._vad_model = None
-        self._is_loaded = False
-        self._speech_detected = False
-        self._speech_start_time = 0.0
-        self._silence_frames = 0
-        logger.info(
-            f"Silero VAD initialized - silence_threshold={silence_threshold}, "
-            f"speech_threshold={speech_threshold}, sample_rate={sample_rate}"
+    def feed(self, frame, *, playback=False):
+        """Return whether speech just started and any completed utterance."""
+        if not frame or len(frame) % 2 or len(frame) > self.bytes_per_second // 2:
+            return False, None
+        samples = np.frombuffer(frame, dtype="<i2").astype(np.float32)
+        rms = float(np.sqrt(np.mean(samples * samples)))
+        voiced = rms >= max(
+            850 if playback else 350, self.noise * (5 if playback else 3)
         )
+        if not self.utterance and not voiced and not playback:
+            self.noise = min(1800.0, self.noise * 0.92 + rms * 0.08)
 
-    async def load(self) -> None:
-        """Load the Silero VAD model.
+        if not self.utterance:
+            self.pre_roll.append(frame)
+            self.pre_roll_size += len(frame)
+            while self.pre_roll_size > self.bytes_per_second // 5:
+                self.pre_roll_size -= len(self.pre_roll.popleft())
+            self.attack = self.attack + len(frame) if voiced else 0
+            if self.attack < self.bytes_per_second * (0.12 if playback else 0.06):
+                return False, None
+            self.utterance.extend(b"".join(self.pre_roll) or frame)
+            self.pre_roll.clear()
+            self.pre_roll_size = 0
+            return True, None
 
-        In production, this would use the LiveKit plugin:
-        `from livekit.plugins import silero`
-
-        For now, this is a placeholder that marks the loading point.
-        """
-        try:
-            # LiveKit plugin: from livekit.plugins import silero
-            # self._vad_model = silero.VAD.load()
-            self._is_loaded = True
-            logger.info("Silero VAD model loaded (via LiveKit plugin)")
-        except ImportError:
-            logger.warning("Silero VAD plugin not available, VAD will be disabled")
-        except Exception as e:
-            logger.error(f"Failed to load Silero VAD: {e}")
-
-    async def detect_speech(self, audio_chunk: bytes) -> bool:
-        """Detect if audio chunk contains speech.
-
-        Args:
-            audio_chunk: Raw audio bytes
-
-        Returns:
-            True if speech is detected
-        """
-        if not self._is_loaded:
-            await self.load()
-
-        # Placeholder - in production, use actual Silero VAD
-        # return self._vad_model(audio_chunk, self.sample_rate)
-        return False
-
-    async def detect_speech_frame(self, audio_frame: bytes) -> dict[str, Any]:
-        """Detect speech in a frame and return detailed state.
-
-        Returns dict with:
-        - speech_detected: bool
-        - is_speech_start: bool (new speech start)
-        - is_speech_end: bool (speech ended)
-        - confidence: float
-        """
-        if not self._is_loaded:
-            await self.load()
-
-        # Placeholder implementation
-        return {
-            "speech_detected": False,
-            "is_speech_start": False,
-            "is_speech_end": False,
-            "confidence": 0.0,
-        }
+        self.utterance.extend(frame)
+        self.silence = 0 if voiced else self.silence + len(frame)
+        if (
+            self.silence < self.bytes_per_second * 0.55
+            and len(self.utterance) < self.bytes_per_second * 10
+        ):
+            return False, None
+        trailing = max(0, self.silence - self.bytes_per_second // 10)
+        voiced_length = len(self.utterance) - self.silence
+        packet = bytes(self.utterance[: len(self.utterance) - trailing])
+        self.utterance.clear()
+        self.silence = self.attack = 0
+        return False, packet if voiced_length >= self.bytes_per_second * 0.12 else None

@@ -506,7 +506,7 @@ MARK includes an optional Vision Department.
 
 ## Supplied model
 
-- Checkpoint: `human.pt`
+- Checkpoint: `assets/models/human.pt`
 - Size: 6,259,289 bytes
 - Loaded successfully with Ultralytics
 - Architecture/task: DetectionModel / detect
@@ -642,7 +642,7 @@ run_mark.bat
 
 ```bat
 .\.venv\Scripts\python.exe main.py
-.\.venv\Scripts\python.exe setup.py --doctor
+.\.venv\Scripts\python.exe -m tooling.setup --doctor
 .\.venv\Scripts\python.exe -m core.llm check
 .\.venv\Scripts\python.exe -m core.llm pull
 ```
@@ -877,8 +877,8 @@ Use these repository files for further screenshots or references:
 
 | Topic | Source |
 |---|---|
-| Overview | [README.md](../README.md) |
-| Setup | [SETUP.md](../SETUP.md) |
+| Overview | [README.md](README.md) |
+| Setup | [SETUP.md](SETUP.md) |
 | Architecture report | [PROJECT_ANALYSIS_REPORT.md](PROJECT_ANALYSIS_REPORT.md) |
 | Runtime status | [STATUS.md](STATUS.md) |
 | Vision | [VISION_DEPARTMENT.md](VISION_DEPARTMENT.md) |

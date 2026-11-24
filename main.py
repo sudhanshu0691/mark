@@ -60,14 +60,14 @@ except ImportError:
 
 
 def _install_first_run_requirements() -> None:
-    """Dependencies must be installed explicitly via setup.py/setup_windows.bat.
+    """Dependencies must be installed explicitly via tooling.setup/setup_windows.bat.
 
     Automatic pip installs during normal startup are disabled for stability and
     supply-chain safety. If config is missing, just inform the user.
     """
     if not (_platform.system() == "Windows" and not (Path(__file__).resolve().parent / "config" / "api_keys.json").exists()):
         return
-    print("[MARK] First run detected. Please run setup_windows.bat (or `python setup.py`) to install dependencies.")
+    print("[MARK] First run detected. Please run setup_windows.bat (or `python -m tooling.setup`) to install dependencies.")
 
 
 _install_first_run_requirements()
@@ -91,7 +91,7 @@ import numpy as np
 import sounddevice as sd
 import google.genai as genai
 from google.genai import types as gtypes
-from ui import MarkUI
+from desktop.ui import MarkUI
 from memory.memory_manager import (
     load_memory, format_memory_for_prompt,
     save_session_summary, pop_last_session,
@@ -649,8 +649,8 @@ TOOL_DECLARATIONS = [
         "Processes any file that the user has uploaded or dropped onto the interface. "
         "Use this when the user refers to an uploaded file and wants an action on it. "
         "Supports: images (describe/ocr/resize/compress/convert), "
-        "PDFs (summarize/extract_text/to_word), "
-        "Word docs & text files (summarize/fix/reformat/translate), "
+        "PDFs (create, merge, split, rotate, reorder, extract pages, summarize locally, OCR, searchable PDF, image conversion), "
+        "Word docs (create, edit, find_replace, convert to PDF, analyze), "
         "CSV (analyze/stats/filter/sort/convert); for Excel workbooks use the dedicated excel tool, "
         "JSON/XML (validate/format/analyze), "
         "code files (explain/review/fix/optimize/run/document/test), "
@@ -704,7 +704,24 @@ TOOL_DECLARATIONS = [
             "condition": {"type": "STRING",  "description": "Filter condition: equals|contains|gt|lt"},
             "ascending": {"type": "BOOLEAN", "description": "Sort order for CSV sort (default: true)"},
             "save":      {"type": "BOOLEAN", "description": "Save result to file (default: true)"},
-            "destination": {"type": "STRING", "description": "Output folder for archive extract"},
+            "destination": {"type": "STRING", "description": "Output path, or directory for archive extraction"},
+            "sources": {"type": "ARRAY", "items": {"type": "STRING"}},
+            "pages": {"type": "ARRAY", "items": {"type": "INTEGER"}},
+            "degrees": {"type": "INTEGER"},
+            "text": {"type": "STRING"},
+            "title": {"type": "STRING"},
+            "template": {"type": "STRING"},
+            "find": {"type": "STRING"},
+            "replacement": {"type": "STRING"},
+            "header": {"type": "STRING"},
+            "footer": {"type": "STRING"},
+            "page_numbers": {"type": "BOOLEAN"},
+            "blocks": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
+                "type": {"type": "STRING", "description": "heading | paragraph | table | image | page_break"},
+                "text": {"type": "STRING"}, "level": {"type": "INTEGER"}, "style": {"type": "STRING"},
+                "rows": {"type": "ARRAY", "items": {"type": "ARRAY", "items": {"type": "STRING"}}},
+                "path": {"type": "STRING"}, "width": {"type": "NUMBER"},
+            }, "required": ["type"]}},
         },
         "required": []
     }
@@ -769,6 +786,8 @@ class MarkLive:
         self._loop                = None
         self._is_speaking         = False
         self._speaking_lock       = threading.Lock()
+        from core.voice_stream import PlaybackBargeIn
+        self._barge_in = PlaybackBargeIn(SEND_SAMPLE_RATE, RECEIVE_SAMPLE_RATE)
         self._interrupted          = False   # True while draining audio after user interrupt
         self._ask_after_interrupt  = False  # ask what happened after the cancelled turn ends
         self._cancel_requested     = False   # True when user wants current tool/thinking cancelled
@@ -997,7 +1016,7 @@ class MarkLive:
         elif not self.ui.muted:
             self.ui.set_state("LISTENING")
 
-    def interrupt(self) -> None:
+    def interrupt(self, *, spoken=False) -> None:
         """Stop MARK mid-speech: drain queued audio and open mic immediately."""
         self._interrupted = True
         self._cancel_requested = True
@@ -1007,7 +1026,7 @@ class MarkLive:
             asyncio.run_coroutine_threadsafe(worker.interrupt(), self._loop)
         if self._active_task_id is not None:
             TASKS.request_cancel(self._active_task_id)
-        self._ask_after_interrupt = bool(self.session)
+        self._ask_after_interrupt = bool(self.session) and not spoken
         # Cancel in-flight tool/thinking task if any
         t = self._current_tool_task
         if t is not None and not t.done():
@@ -1352,7 +1371,14 @@ class MarkLive:
                 result = await loop.run_in_executor(None, lambda: self.plugins.run(name, excel_args))
 
             elif self.plugins.has_tool(name):
+                sandboxed = self.plugins.is_sandboxed(name) is True
                 result = await loop.run_in_executor(None, lambda: self.plugins.run(name, args))
+                if sandboxed:
+                    from core.cloud_privacy import redact_text
+
+                    self.ui.write_log(redact_text(str(result))[:5000])
+                    tag = next((tag for tag in ("[FAILED]", "[CANCELLED]") if str(result).startswith(tag)), "[UNVERIFIED]")
+                    result = tag + " Isolated plugin output is available locally."
 
             elif name == "open_app":
                 r = await loop.run_in_executor(None, lambda: open_app(parameters=args, response=None, player=self.ui))
@@ -1424,9 +1450,21 @@ class MarkLive:
                 if ext in {".xlsx", ".xlsm", ".xls", ".ods"}:
                     result = "[FAILED] Use the dedicated excel tool for workbook inspection, edits, formulas, summaries, and charts."
                 else:
-                    r = await loop.run_in_executor(
-                        None,
-                        lambda: file_processor(parameters=args, player=self.ui, speak=self.speak)
+                    def authorize_file_cloud(path):
+                        request = asyncio.run_coroutine_threadsafe(
+                            self.ui.confirm_action("send file content to the configured cloud provider",
+                                                   {"file": str(path), "action": args.get("action", "auto")}),
+                            loop,
+                        )
+                        try:
+                            return request.result(timeout=125)
+                        except TimeoutError:
+                            request.cancel()
+                            return False
+
+                    r = await asyncio.to_thread(
+                        file_processor, parameters=args, player=self.ui, speak=self.speak,
+                        authorize_cloud=authorize_file_cloud,
                     )
                     result = r or "[UNVERIFIED] The tool returned no output; effect unknown."
 
@@ -1566,8 +1604,12 @@ class MarkLive:
     async def _listen_audio(self):
         loop = asyncio.get_event_loop()
 
-        def enqueue_audio(data: bytes) -> None:
-            if self.out_queue is None:
+        def enqueue_audio(data: bytes, interrupt: bool = False) -> None:
+            if self.ui.muted or self.out_queue is None:
+                return
+            if interrupt and self._is_speaking:
+                self.interrupt(spoken=True)
+            if not data:
                 return
             try:
                 self.out_queue.put_nowait(
@@ -1589,12 +1631,10 @@ class MarkLive:
                         self.ui.set_level(min(1.0, rms * 9.0))
                 except Exception:
                     pass
-            if not mark_speaking and not self.ui.muted:
-                data = indata.tobytes()
-                loop.call_soon_threadsafe(
-                    enqueue_audio,
-                    data,
-                )
+            if not self.ui.muted:
+                data, interrupt = self._barge_in.microphone(indata.tobytes(), playing=mark_speaking)
+                if data:
+                    loop.call_soon_threadsafe(enqueue_audio, data, interrupt)
 
         delay = 0.5
         while True:
@@ -1706,6 +1746,8 @@ class MarkLive:
                             if full_in:
                                 self.ui.write_log(f"You: {full_in}")
                                 self._session_log.append(f"User: {full_in}")
+                                from memory.learning import observe_user_preference
+                                await asyncio.to_thread(observe_user_preference, full_in)
 
                             full_out = " ".join(out_buf).strip()
                             if full_out:
@@ -1782,9 +1824,9 @@ class MarkLive:
 
                 # Batch all immediately-available chunks into one write to reduce
                 # thread-pool round-trips (was one asyncio.to_thread per 50ms slice).
-                # Cap at ~200 ms so interrupt() still stops audio within ~200 ms.
+                # Cap at one short chunk so speech interruption can stop promptly.
                 batch = bytearray(chunk)
-                while len(batch) < 9600:   # 9600 bytes ≈ 200 ms at 24 kHz / 16-bit mono
+                while len(batch) < 2400:   # Keep at most about 50 ms queued in the device.
                     try:
                         batch.extend(self.audio_in_queue.get_nowait())  # type: ignore
                     except asyncio.QueueEmpty:
@@ -1797,7 +1839,9 @@ class MarkLive:
                 except Exception:
                     pass
                 try:
-                    await asyncio.to_thread(stream.write, bytes(batch))
+                    samples = bytes(batch)
+                    self._barge_in.playback(samples)
+                    await asyncio.to_thread(stream.write, samples)
                 except (RuntimeError, asyncio.CancelledError):
                     break   # executor shutting down — exit cleanly
         except Exception as e:
@@ -2334,8 +2378,8 @@ class MarkLive:
             await asyncio.sleep(delay)
 
 def main():
-    ui = MarkUI("assets/face.png")
-    from mark_orb import start_orb
+    ui = MarkUI(str(BASE_DIR / "assets" / "face.png"))
+    from desktop.mark_orb import start_orb
     ui.orb = start_orb(on_restore=ui.restore_from_orb, visible=False)
     from core import llm as _llm_boot
     _llm_boot.set_provider_listener(ui.set_llm_provider)
@@ -2361,5 +2405,35 @@ def main():
         worker.join(timeout=5)
         _llm_boot.providers.close()
 
+def check_startup():
+    """Start the desktop UI and inspect its real plugin registry without cloud calls."""
+    from PySide6.QtCore import QTimer
+
+    started = time.perf_counter()
+    ui = MarkUI(str(BASE_DIR / "assets" / "face.png"))
+    runtime = MarkLive(ui)
+    try:
+        runtime.plugins.load_all(BUILTIN_NAMES)
+        missing = {"excel", "ppt_studio"} - set(runtime.plugins.tool_names())
+        if missing:
+            print(f"Required tools failed to load: {', '.join(sorted(missing))}")
+            return 1
+        ui.show()
+        def close_probe():
+            ui.close()
+            ui.app.quit()
+
+        QTimer.singleShot(0, close_probe)
+        ui.app.exec()
+        print(f"Desktop startup and shutdown completed in {time.perf_counter() - started:.3f}s")
+        return 0
+    finally:
+        runtime.plugins.stop()
+        if not ui._closing:
+            ui.close()
+
+
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--check-startup"]:
+        raise SystemExit(check_startup())
     main()

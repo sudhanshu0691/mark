@@ -4,7 +4,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
-from ui import MarkUI
+from desktop.ui import MarkUI
 
 
 def test_mark_ui_registers_full_size_vision_workspace():

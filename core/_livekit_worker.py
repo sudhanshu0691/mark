@@ -6,6 +6,7 @@ import logging
 import re
 from uuid import uuid4
 from core.voice_stream import SentenceBuffer
+from core._vad import VoiceActivityDetector
 
 logger = logging.getLogger(__name__)
 
@@ -44,13 +45,12 @@ class LiveKitAgentWorker:
         await self.tts_engine.load()
         self._room = room
         identity = getattr(self, "allowed_identity", None)
-        if self.desktop_video_allowed:
-            if not identity:
-                raise RuntimeError("Desktop video requires an authorized participant.")
-            room.local_participant.set_track_subscription_permissions(
-                allow_all_participants=False,
-                participant_permissions=[rtc.ParticipantTrackPermission(participant_identity=identity, allow_all=True)],
-            )
+        if not identity:
+            raise RuntimeError("LiveKit requires an authorized participant identity.")
+        room.local_participant.set_track_subscription_permissions(
+            allow_all_participants=False,
+            participant_permissions=[rtc.ParticipantTrackPermission(participant_identity=identity, allow_all=True)],
+        )
         self._source = rtc.AudioSource(24000, 1)
         track = rtc.LocalAudioTrack.create_audio_track("mark-speech", self._source)
         await room.local_participant.publish_track(track)
@@ -119,30 +119,19 @@ class LiveKitAgentWorker:
 
     async def _receive_audio(self, track):
         from livekit import rtc
-        import numpy as np
         stream = rtc.AudioStream(track, sample_rate=16000, num_channels=1)
-        frames = bytearray()
-        silence = 0
+        detector = VoiceActivityDetector()
         try:
             async for event in stream:
                 if not self._is_running:
                     break
-                data = bytes(event.frame.data)
-                samples = np.frombuffer(data, dtype="<i2").astype(np.float32)
-                voiced = bool(samples.size and np.sqrt(np.mean(samples * samples)) > 450)
-                if voiced and self._turn_task is not None and not self._turn_task.done():
+                started, utterance = detector.feed(bytes(event.frame.data), playback=self._is_speaking)
+                if started and self._turn_task is not None and not self._turn_task.done():
                     await self.interrupt()
-                if voiced or frames:
-                    frames.extend(data)
-                silence = 0 if voiced else silence + len(data)
-                if frames and (silence >= 19200 or len(frames) >= 320000):
-                    utterance = bytes(frames)
-                    frames.clear()
-                    silence = 0
-                    if len(utterance) >= 9600:
-                        text = await self.stt_engine.transcribe(utterance, 16000)
-                        if text:
-                            self.submit_text(text)
+                if utterance:
+                    text = await self.stt_engine.transcribe(utterance, 16000)
+                    if text:
+                        self.submit_text(text)
         finally:
             await stream.aclose()
 
@@ -229,10 +218,13 @@ class LiveKitAgentWorker:
                     try:
                         command = text.strip().casefold().rstrip(".!?")
                         video = re.fullmatch(r"start desktop video(?: (720|1080)p)?(?: monitor ([1-9][0-9]?))?", command)
+                        window = re.fullmatch(r"start window video(?: (720|1080)p)? (.+)", text.strip(), re.I)
                         if command in {"stop desktop preview", "stop desktop video", "stop desktop sharing"}:
                             answer = await self.stop_desktop_sharing()
                         elif video:
                             answer = await self.start_desktop_video(int(video[1] or 720), int(video[2] or 1))
+                        elif window:
+                            answer = await self.start_desktop_video(int(window[1] or 720), 1, window_title=window[2])
                         elif command == "start desktop preview":
                             answer = await self.start_desktop_preview()
                         else:
@@ -280,7 +272,7 @@ class LiveKitAgentWorker:
         return ui is not None and await ui.confirm_action(
             "share your desktop via LiveKit", {"recipient": identity, "mode": mode, **details})
 
-    async def start_desktop_video(self, resolution, monitor):
+    async def start_desktop_video(self, resolution, monitor, *, window_title=None):
         from core.streaming.desktop import DesktopVideo
 
         async with self._share_lock:
@@ -292,14 +284,33 @@ class LiveKitAgentWorker:
                 return "[FAILED] Desktop video is disabled or its authorized recipient is unavailable."
             if self._desktop_video is not None and self._desktop_video.running:
                 return "[DONE] Desktop video already active."
-            if not await self._confirm_share("video", identity, resolution=f"{resolution}p", monitor=monitor):
+            details = {"monitor": monitor}
+            target = None
+            if window_title is not None:
+                import sys
+                from core.streaming.window_capture import select_window
+
+                if sys.platform != "win32":
+                    return "[FAILED] Single-window video requires Windows."
+                try:
+                    target = await asyncio.to_thread(select_window, window_title)
+                except ValueError as exc:
+                    return f"[FAILED] {exc}"
+                details = {"window": target[2], "process_id": target[1]}
+            if not await self._confirm_share("window video" if target else "video", identity,
+                                             resolution=f"{resolution}p", **details):
                 return "[CANCELLED] Desktop sharing was declined."
             if generation != self._share_generation or self._room is not room or not self._is_running:
                 return "[CANCELLED] Desktop sharing request expired."
             await self.stop_desktop_preview()
             if generation != self._share_generation:
                 return "[CANCELLED] Desktop sharing request expired."
-            video = DesktopVideo(room, identity, monitor, resolution, self._sharing_indicator)
+            options = {}
+            if target:
+                from core.streaming.window_capture import WindowCapture
+
+                options["window"] = WindowCapture(target)
+            video = DesktopVideo(room, identity, monitor, resolution, self._sharing_indicator, **options)
             self._desktop_video = video
             try:
                 if await video.start():

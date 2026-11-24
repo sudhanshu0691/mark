@@ -53,7 +53,7 @@ from PySide6.QtWidgets import (
 
 from core.telemetry import TELEMETRY
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parents[1]
 CONFIG_FILE = BASE_DIR / "config" / "api_keys.json"
 
 STATE_RGB = {

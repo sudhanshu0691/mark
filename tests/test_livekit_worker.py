@@ -10,7 +10,8 @@ def test_duplicate_subscription_and_stale_room(monkeypatch):
         def __init__(self):
             self.handlers = {}
             self.remote_participants = {}
-            self.local_participant = SimpleNamespace(publish_track=AsyncMock())
+            self.local_participant = SimpleNamespace(publish_track=AsyncMock(),
+                                                     set_track_subscription_permissions=lambda **kwargs: None)
             self.disconnect = AsyncMock()
         def on(self, event):
             def register(fn):
@@ -21,7 +22,7 @@ def test_duplicate_subscription_and_stale_room(monkeypatch):
         source = SimpleNamespace(clear_queue=lambda: None, aclose=AsyncMock())
         rtc = SimpleNamespace(AudioSource=lambda *a: source,
             LocalAudioTrack=SimpleNamespace(create_audio_track=lambda *a: object()),
-            TrackKind=SimpleNamespace(KIND_AUDIO=1))
+            TrackKind=SimpleNamespace(KIND_AUDIO=1), ParticipantTrackPermission=SimpleNamespace)
         monkeypatch.setitem(sys.modules, "livekit", SimpleNamespace(rtc=rtc))
         worker = LiveKitAgentWorker(object(), stt_engine=SimpleNamespace(load=AsyncMock()),
             tts_engine=SimpleNamespace(load=AsyncMock()))
@@ -58,3 +59,21 @@ def test_response_data_is_only_sent_to_authorized_identity():
         await worker.send_text("private")
         publish.assert_awaited_once_with(b"private", reliable=True, topic="mark.response", destination_identities=["owner"])
     asyncio.run(run())
+
+
+def test_voice_endpointing_keeps_start_of_speech_and_discards_single_noise_peak():
+    from core._vad import VoiceActivityDetector
+
+    def frame(amplitude):
+        return amplitude.to_bytes(2, "little", signed=True) * 320
+
+    detector = VoiceActivityDetector()
+    assert detector.feed(frame(2000)) == (False, None)
+    for _ in range(6):
+        assert detector.feed(frame(90)) == (False, None)
+    events = [detector.feed(frame(2000)) for _ in range(12)]
+    assert sum(started for started, _ in events) == 1
+    assert all(packet is None for _, packet in events)
+    packets = [packet for _, packet in (detector.feed(frame(90)) for _ in range(30)) if packet]
+    assert len(packets) == 1
+    assert frame(2000) in packets[0]

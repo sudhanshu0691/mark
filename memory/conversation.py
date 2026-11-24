@@ -225,12 +225,59 @@ def recent_messages(channel=None, budget=4800, conversation_id=None) -> list[dic
     return [message for pair in reversed(messages) for message in pair]
 
 
+_CONCEPTS = (
+    ("editor", "coding", "code", "ide", "development", "कोड", "कोडिंग", "programming"),
+    ("style", "response", "reply", "answers", "jawab", "जवाब", "संक्षिप्त"),
+    ("language", "hindi", "hinglish", "english", "bhasha", "भाषा", "हिंदी", "अंग्रेजी", "हिंग्लिश"),
+    ("project", "workspace", "project work", "प्रोजेक्ट", "परियोजना", "kaam"),
+)
+
+
+def _memory_terms(text):
+    import re
+    import unicodedata
+
+    text = unicodedata.normalize("NFKC", text).casefold().replace("_", " ")
+    terms = set(re.findall(r"[^\W_]+", text))
+    for concept in _CONCEPTS:
+        if any(re.search(r"(?<!\w)" + re.escape(alias) + r"(?!\w)", text) for alias in concept):
+            terms.add(concept[0])
+    return terms
+
+
+def relevant_facts(query, memory, limit=6):
+    """Rank facts by topic aliases and token overlap with the current request."""
+    terms = _memory_terms(query)
+    matches = []
+    for category in ("preferences", "projects"):
+        for key, entry in memory.get(category, {}).items():
+            value = str(entry.get("value", ""))[:380]
+            if entry.get("source") == "user_confirmed":
+                # Individually confirmed potentially sensitive values stay local.
+                continue
+            key_terms = _memory_terms(f"{category} {key}")
+            score = 3 * len(terms & key_terms) + len(terms & _memory_terms(value))
+            if score or category == "preferences" and key in {"reply_style", "reply_language"}:
+                matches.append((score, category, key, value))
+    matches.sort(key=lambda row: (-row[0], row[1], row[2]))
+    selected = []
+    seen = set()
+    for _, category, key, value in matches:
+        fingerprint = (category, " ".join(value.casefold().split()))
+        if fingerprint not in seen:
+            seen.add(fingerprint)
+            selected.append({"category": category, "key": key, "value": value})
+        if len(selected) >= limit:
+            break
+    return selected
+
+
 def build_turn_context(query, *, conversation_id=None, share_cloud=False):
     """Return bounded, conversation-scoped context only with explicit sharing enabled."""
     if not share_cloud:
         return [], ""
     from memory import db
-    from memory.memory_manager import load_memory, format_memory_for_prompt
+    from memory.memory_manager import load_memory
     from core.cloud_privacy import redact_text
     if conversation_id is None:
         active = db.get_active_conversation()
@@ -245,7 +292,7 @@ def build_turn_context(query, *, conversation_id=None, share_cloud=False):
     ):
         if ("user", turn["user"][:800]) not in seen:
             snippets.append({"user": turn["user"][:400], "assistant": turn["assistant"][:500]})
-    facts = format_memory_for_prompt(load_memory())[:1500]
+    facts = relevant_facts(query, load_memory())
     context = json.dumps({"stored_facts": facts, "relevant_earlier_turns": snippets}, ensure_ascii=False)
     history = [{**msg, "content": redact_text(msg["content"])} for msg in history]
     return history, redact_text(context[:4000])

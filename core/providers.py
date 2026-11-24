@@ -19,6 +19,7 @@ from threading import BoundedSemaphore
 
 _slots = BoundedSemaphore(2)
 _task_usage = ContextVar("mark_cloud_task", default=None)
+_task_limit = ContextVar("mark_cloud_task_limit", default=None)
 USAGE_PATH = Path(__file__).resolve().parent.parent / "data" / "cloud_usage.db"
 
 
@@ -27,14 +28,16 @@ class BudgetExceeded(RuntimeError):
 
 
 @contextmanager
-def task_budget():
+def task_budget(max_requests=None):
     if _task_usage.get() is not None:
         yield
         return
     token = _task_usage.set({})
+    limit = _task_limit.set(max_requests)
     try:
         yield
     finally:
+        _task_limit.reset(limit)
         _task_usage.reset(token)
 
 
@@ -42,6 +45,9 @@ def reserve(name, cfg):
     """Count submitted requests, including each retry, across MARK restarts."""
     limits = cfg.get("cloud_limits", {})
     per_task = int(limits.get("requests_per_task", 0))
+    local_limit = _task_limit.get()
+    if local_limit is not None:
+        per_task = min(per_task, local_limit) if per_task > 0 else local_limit
     daily = int(limits.get("requests_per_day", 0))
     usage = _task_usage.get()
     if usage is not None:

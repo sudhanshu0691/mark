@@ -10,7 +10,7 @@ Installer me **"Add python.exe to PATH"** tick karna. 3.10 se purana ya 3.14 mat
 3. Ollama install karke `.venv\Scripts\python.exe -m core.llm pull` chalao. Gemini Live voice ke liye Gemini API key chahiye.
 4. `run_mark.bat` chalao. Keys ko dashboard ke **API KEYS** control se OS credential store me save karo.
 
-Dependencies normal startup par install nahi hoti. Setup ke liye `setup_windows.bat` ya `python setup.py` chalao. Tesseract aur FFmpeg jaise external Windows tools alag se install karne pad sakte hain.
+Dependencies normal startup par install nahi hoti. Setup ke liye `setup_windows.bat` ya `python -m tooling.setup` chalao. Tesseract aur FFmpeg jaise external Windows tools alag se install karne pad sakte hain.
 
 Full power (protected files, sab apps install): `run_as_admin.bat`. Login pe auto-start: `autostart_on_login.bat`.
 ## 3. Windows settings jo ek baar karni hain

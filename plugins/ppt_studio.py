@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from actions.office_files import convert_pdf, permitted, save_verified
 from core.result import done, failed
 
 NAME = "ppt_studio"
@@ -25,7 +26,7 @@ DECLARATION = {
     "description": (
         "Create or edit a .pptx presentation. "
         "action: create | add_slide | add_text | add_image | read | list | "
-        "delete_slide | duplicate | rename | save_as. "
+        "delete_slide | duplicate | rename | save_as | reorder | edit_text | notes | add_shape | add_table | add_chart | validate | to_pdf. "
         "path = file path, slides = list of {title, bullets} for create."
     ),
     "parameters": {
@@ -58,6 +59,16 @@ DECLARATION = {
                 "description": "For create: [{title, bullets}]",
             },
             "new_path": {"type": "STRING", "description": "Target path for save_as / rename"},
+            "destination_index": {"type": "INTEGER"},
+            "shape_index": {"type": "INTEGER"},
+            "template": {"type": "STRING"},
+            "layout": {"type": "INTEGER"},
+            "shape": {"type": "STRING"},
+            "x": {"type": "NUMBER"}, "y": {"type": "NUMBER"},
+            "width": {"type": "NUMBER"}, "height": {"type": "NUMBER"},
+            "rows": {"type": "ARRAY", "items": {"type": "ARRAY", "items": {"type": "STRING"}}},
+            "values": {"type": "ARRAY", "items": {"type": "NUMBER"}},
+            "categories": {"type": "ARRAY", "items": {"type": "STRING"}},
         },
         "required": ["action", "path"],
     },
@@ -65,11 +76,14 @@ DECLARATION = {
 
 
 def _path(p) -> Path:
-    return Path(str(p or "")).expanduser()
+    if not p:
+        raise ValueError("A presentation path is required.")
+    return Path(str(p)).expanduser()
 
 
 def _open(path: Path, must_exist: bool = True):
     from pptx import Presentation
+    permitted(path)
     if must_exist or path.exists():
         if not path.exists():
             return None, f"presentation not found: {path}"
@@ -94,6 +108,14 @@ def _titles(prs) -> list[str]:
 
 
 def run(args: dict, ctx):
+    try:
+        return _run(args)
+    except (OSError, ValueError, KeyError, RuntimeError, TypeError) as exc:
+        return failed("Presentation operation failed", f"{type(exc).__name__}: {exc}")
+
+
+def _run(args):
+
     act = str(args.get("action", "create")).lower().strip()
     path = _path(args.get("path"))
     if not path:
@@ -101,9 +123,17 @@ def run(args: dict, ctx):
     if path.suffix.lower() != ".pptx":
         path = path.with_suffix(".pptx")
 
+    if act in {"reorder", "edit_text", "notes", "add_shape", "add_table", "add_chart", "validate", "to_pdf"}:
+        return _advanced(path, act, args)
+
     # ── create ────────────────────────────────────────────────────────────────
     if act in ("create", "new"):
-        prs, err = _open(path, must_exist=False)
+        if path.exists():
+            return failed("Presentation already exists", "Choose a new path or edit the existing deck.")
+        if args.get("template"):
+            prs, err = _open(_path(args["template"]))
+        else:
+            prs, err = _open(path, must_exist=False)
         if err:
             return failed("Could not create presentation", err)
         specs = args.get("slides")
@@ -158,7 +188,10 @@ def run(args: dict, ctx):
         if err:
             return failed("Could not open presentation", err)
         before = len(prs.slides)
-        layout = prs.slide_layouts[1] if len(prs.slide_layouts) > 1 else prs.slide_layouts[0]
+        layout_index = int(args.get("layout", min(1, len(prs.slide_layouts) - 1)))
+        if not 0 <= layout_index < len(prs.slide_layouts):
+            raise ValueError("Invalid slide layout index.")
+        layout = prs.slide_layouts[layout_index]
         sl = prs.slides.add_slide(layout)
         if sl.shapes.title is not None:
             sl.shapes.title.text = str(args.get("title") or "New slide")
@@ -199,7 +232,7 @@ def run(args: dict, ctx):
 
     # ── add_image ─────────────────────────────────────────────────────────────
     if act == "add_image":
-        img = _path(args.get("image_path"))
+        img = permitted(_path(args.get("image_path")))
         if not img.exists():
             return failed(f"Image not found: {img}", "image_path does not exist")
         prs, err = _open(path)
@@ -249,8 +282,29 @@ def run(args: dict, ctx):
         before = len(prs.slides)
         src = prs.slides[idx - 1]
         dst = prs.slides.add_slide(src.slide_layout)
-        if dst.shapes.title is not None and src.shapes.title is not None:
-            dst.shapes.title.text = f"{src.shapes.title.text} (copy)"
+        from copy import deepcopy
+
+        relations = {}
+        for old_id, relationship in src.part.rels.items():
+            if relationship.reltype.endswith(("/slideLayout", "/notesSlide")):
+                continue
+            target = relationship.target_ref if relationship.is_external else relationship.target_part
+            relations[old_id] = dst.part.relate_to(
+                target, relationship.reltype, is_external=relationship.is_external,
+            )
+        for shape in list(dst.shapes):
+            dst.shapes._spTree.remove(shape.element)
+        for shape in src.shapes:
+            element = deepcopy(shape.element)
+            for node in element.iter():
+                for attribute, value in tuple(node.attrib.items()):
+                    if attribute.startswith("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}") and value in relations:
+                        node.set(attribute, relations[value])
+            dst.shapes._spTree.insert_element_before(element, "p:extLst")
+        if src.has_notes_slide:
+            original = src.notes_slide.notes_text_frame
+            if original is not None:
+                dst.notes_slide.notes_text_frame.text = original.text
         err = _save(prs, path)
         if err:
             return failed("Copy not saved", err)
@@ -268,7 +322,7 @@ def run(args: dict, ctx):
         prs, err = _open(path)
         if err:
             return failed("Could not open presentation", err)
-        dest.parent.mkdir(parents=True, exist_ok=True)
+        permitted(dest, write=True).parent.mkdir(parents=True, exist_ok=True)
         err = _save(prs, dest)
         if err:
             return failed("Copy could not be written", err)
@@ -280,14 +334,139 @@ def run(args: dict, ctx):
                   "valid: create read list add_slide add_text add_image delete_slide duplicate rename save_as")
 
 
+def _text_overflows(shape):
+    import os
+    from math import ceil
+
+    from PIL import ImageFont
+    from pptx.enum.text import MSO_AUTO_SIZE
+
+    if not shape.has_text_frame or not shape.text.strip():
+        return False
+    frame = shape.text_frame
+    if frame.auto_size in {MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT, MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE}:
+        return False
+    available_width = (shape.width - frame.margin_left - frame.margin_right) / 12700
+    available_height = (shape.height - frame.margin_top - frame.margin_bottom) / 12700
+    if min(available_width, available_height) <= 0:
+        return True
+
+    height = 0.0
+    for paragraph in frame.paragraphs:
+        sizes = [run.font.size.pt for run in paragraph.runs if run.font.size]
+        size = max(sizes, default=paragraph.font.size.pt if paragraph.font.size else 18)
+        windows_font = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts" / "arial.ttf"
+        try:
+            font = ImageFont.truetype(str(windows_font) if windows_font.is_file() else "DejaVuSans.ttf",
+                                      max(1, round(size * 2)))
+        except OSError:
+            font = ImageFont.load_default(size=max(1, round(size * 2)))
+        lines = 0
+        for line in paragraph.text.split("\v"):
+            width = font.getlength(line) / 2
+            if frame.word_wrap is False and width > available_width:
+                return True
+            lines += max(1, ceil(width / available_width))
+        spacing = paragraph.line_spacing
+        line_height = spacing.pt if hasattr(spacing, "pt") else size * (spacing or 1.2)
+        height += lines * line_height
+        height += sum(value.pt for value in (paragraph.space_before, paragraph.space_after) if value)
+    return height > available_height + 2
+
+
+def _advanced(path, action, args):
+    from pptx.chart.data import CategoryChartData
+    from pptx.enum.chart import XL_CHART_TYPE
+    from pptx.enum.shapes import MSO_SHAPE
+    from pptx.util import Inches
+
+    if action == "to_pdf":
+        destination = args.get("new_path") or path.with_suffix(".pdf")
+        convert_pdf(path, destination)
+        return done(f"Converted {path.name} to PDF")
+    prs, error = _open(path)
+    if error:
+        return failed("Could not open presentation", error)
+    if action == "validate":
+        issues = [
+            f"Slide {index}, shape {shape.name}"
+            for index, slide in enumerate(prs.slides, 1)
+            for shape in slide.shapes
+            if min(shape.left, shape.top) < 0 or shape.left + shape.width > prs.slide_width
+            or shape.top + shape.height > prs.slide_height
+        ]
+        if issues:
+            return failed("Shapes extend beyond the slide canvas", ", ".join(issues[:20]))
+        overflow = [
+            f"Slide {index}, shape {shape.name}"
+            for index, slide in enumerate(prs.slides, 1)
+            for shape in slide.shapes
+            if _text_overflows(shape)
+        ]
+        if overflow:
+            return failed("Estimated text overflow", ", ".join(overflow[:20]))
+        return done("Slide shapes fit the canvas and text fits the estimated bounds",
+                    evidence=f"{len(prs.slides)} slides")
+
+    index = int(args.get("index", 1))
+    if not 1 <= index <= len(prs.slides):
+        raise ValueError("Invalid slide number.")
+    slide = prs.slides[index - 1]
+    if action == "reorder":
+        destination = int(args["destination_index"])
+        if not 1 <= destination <= len(prs.slides):
+            raise ValueError("Invalid destination slide number.")
+        ids = prs.slides._sldIdLst
+        item = ids[index - 1]
+        ids.remove(item)
+        ids.insert(destination - 1, item)
+    elif action == "edit_text":
+        shape_index = int(args["shape_index"])
+        if not 1 <= shape_index <= len(slide.shapes) or not slide.shapes[shape_index - 1].has_text_frame:
+            raise ValueError("Choose a valid text shape.")
+        slide.shapes[shape_index - 1].text = args.get("text", "")
+    elif action == "notes":
+        slide.notes_slide.notes_text_frame.text = args.get("text", "")
+    else:
+        coordinates = tuple(Inches(float(args.get(key, default))) for key, default in
+                            (("x", 1), ("y", 2), ("width", 5), ("height", 2)))
+        x, y, w, h = coordinates
+        if min(x, y) < 0 or min(w, h) <= 0 or x + w > prs.slide_width or y + h > prs.slide_height:
+            raise ValueError("Shape dimensions exceed the slide canvas.")
+        if action == "add_shape":
+            kind = {"rectangle": MSO_SHAPE.RECTANGLE, "rounded": MSO_SHAPE.ROUNDED_RECTANGLE,
+                    "oval": MSO_SHAPE.OVAL}.get(args.get("shape", "rectangle"))
+            if kind is None:
+                raise ValueError("Choose rectangle, rounded or oval.")
+            slide.shapes.add_shape(kind, *coordinates).text = args.get("text", "")
+        elif action == "add_table":
+            rows = args.get("rows") or []
+            if not rows or not rows[0] or any(len(row) != len(rows[0]) for row in rows):
+                raise ValueError("Provide rectangular table rows.")
+            table = slide.shapes.add_table(len(rows), len(rows[0]), *coordinates).table
+            for i, row in enumerate(rows):
+                for j, value in enumerate(row):
+                    table.cell(i, j).text = str(value)
+        elif action == "add_chart":
+            categories = args.get("categories") or []
+            values = args.get("values") or []
+            if not categories or len(categories) != len(values):
+                raise ValueError("Chart labels and values must have matching lengths.")
+            data = CategoryChartData()
+            data.categories = categories
+            data.add_series(args.get("title") or "Values", values)
+            slide.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, *coordinates, data)
+    error = _save(prs, path)
+    if error:
+        return failed("Could not save presentation", error)
+    return done(f"Saved {path.name}", evidence=f"{len(prs.slides)} slides reopened")
+
+
 def _save(prs, path: Path) -> str | None:
-    """Save, then REOPEN to prove the file really works.  Returns an error or None."""
     from pptx import Presentation
-    prs.save(str(path))
-    if not path.exists() or path.stat().st_size < 512:
-        return f"file was not written (size={path.stat().st_size if path.exists() else 0} bytes)"
+
     try:
-        Presentation(str(path))
-    except Exception as e:
-        return f"saved file cannot be reopened: {type(e).__name__}: {e}"
+        save_verified(path, prs.save, Presentation, replace=path.exists())
+    except (OSError, ValueError) as exc:
+        return f"{type(exc).__name__}: {exc}"
     return None

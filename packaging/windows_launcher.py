@@ -7,6 +7,8 @@ from pathlib import Path
 def main():
     if getattr(sys, "frozen", False):
         root = Path(sys.executable).resolve().parent
+        if root.name.casefold() == "packaging" and not (root / "main.py").is_file():
+            root = root.parent
     else:
         root = Path(__file__).resolve().parent.parent
     scripts = root / ".venv" / "Scripts"
@@ -16,7 +18,7 @@ def main():
         console = scripts / "python.exe"
         if not console.is_file() or not python.is_file() or not program.is_file():
             return 1
-        return subprocess.run([str(console), "-c", "import main"], cwd=root, check=False).returncode
+        return subprocess.run([str(console), str(program), "--check-startup"], cwd=root, check=False, timeout=60).returncode
     if not python.is_file():
         import ctypes
 

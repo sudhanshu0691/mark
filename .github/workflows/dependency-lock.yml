@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'pyproject.toml'
+      - 'tooling/pyproject.toml'
       - '.github/workflows/dependency-lock.yml'
 permissions:
   contents: read
@@ -17,6 +17,7 @@ jobs:
       contents: write
     env:
       QT_QPA_PLATFORM: offscreen
+      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/.venv
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -25,15 +26,15 @@ jobs:
       - run: python -m pip install uv
       - name: Resolve and verify lock
         run: |
-          uv lock
-          uv sync --locked --python 3.11 --extra livekit --extra vision
-          uv run --no-sync python -m pytest tests -q
+          uv lock --project tooling
+          uv sync --project tooling --locked --python 3.11 --extra livekit --extra vision
+          uv run --project tooling --no-sync python -m pytest -c tooling/pyproject.toml tests -q
       - name: Commit lock only
         shell: bash
         run: |
           git config user.name "MARK dependency workflow"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -f -- uv.lock
+          git add -f -- tooling/uv.lock
           if git diff --cached --quiet; then exit 0; fi
           git commit -m "Commit verified uv dependency lock"
           git push origin HEAD:main

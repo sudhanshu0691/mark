@@ -20,3 +20,19 @@ def test_conversation_delta_forwarded(monkeypatch):
     answer = o.MasterOrchestrator().execute("hi", dispatch=lambda *a: None, declarations=lambda: [], on_delta=seen.append)
     assert answer == "Hello."
     assert seen == ["Hello."]
+
+
+def test_pcm_echo_is_suppressed_and_distinct_sustained_voice_interrupts():
+    import numpy as np
+
+    from core.voice_stream import PlaybackBargeIn
+
+    rng = np.random.default_rng(12)
+    audio = rng.integers(-2800, 2800, 2048, dtype=np.int16)
+    gate = PlaybackBargeIn(speaker_rate=16_000)
+    gate.playback(audio.tobytes())
+    echo = (audio[400:1424] // 2).astype("<i2")
+    assert gate.microphone(echo.tobytes(), playing=True) == (b"", False)
+    speech = rng.integers(-3500, 3500, 1024, dtype=np.int16).tobytes()
+    assert gate.microphone(speech, playing=True) == (b"", False)
+    assert gate.microphone(speech, playing=True) == (speech * 2, True)
