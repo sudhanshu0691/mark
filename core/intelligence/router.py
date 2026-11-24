@@ -16,7 +16,7 @@ class ModelRouter:
         
         Args:
             available_models: Dict mapping model roles to model names
-                            e.g., {"fast": "qwen3:4b", "text": "qwen3:4b", "code": "qwen3:4b", "vision": "qwen2.5vl:3b"}
+                            Use configured cloud model IDs.
         """
         self.available_models = available_models or {}
         self._history: list[dict] = []
@@ -50,7 +50,6 @@ class ModelRouter:
             "complexity": complexity.value,
             "model": model,
             "reasoning_depth": routing.get("reasoning_depth", "standard"),
-            "extraction": extraction,
         }
         self._record_routing(routing_decision)
         
@@ -110,7 +109,9 @@ def get_model_router(available_models: Dict[str, str] | None = None) -> ModelRou
     global _model_router
     if _model_router is None:
         if available_models is None:
-            available_models = {"fast": "qwen3:4b", "text": "qwen3:4b", "code": "qwen3:4b", "vision": "qwen2.5vl:3b"}
+            from core.llm import model_for, load_config
+            cfg = load_config()
+            available_models = {role: model_for(role, cfg) for role in ("fast", "text", "tool", "planning", "code", "vision")}
         _model_router = ModelRouter(available_models)
     return _model_router
 

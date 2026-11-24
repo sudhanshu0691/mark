@@ -1,22 +1,17 @@
-"""Compatibility facade for cloud role selection."""
+"""Compatibility facade sharing the master command routing policy."""
 from __future__ import annotations
-from typing import Any
-from core.complexity_estimator import ComplexityEstimator
-from core.llm import load_config
+from core.llm import load_config, model_for
+from core.agents.orchestrator import select_route
 
 class AdaptiveIntelligenceRouter:
-    def __init__(self):
-        self.complexity_estimator = ComplexityEstimator()
-
-    def route(self, user_input: str, context: str = "") -> dict[str, Any]:
+    def route(self, user_input: str, context: str = "") -> dict:
+        route = select_route(user_input)
         cfg = load_config()
-        complexity = self.complexity_estimator.estimate(user_input, context)
-        provider = "gemini" if cfg.get("backend") == "gemini" else cfg.get("primary_provider", "groq")
-        models = cfg.get("providers", {}).get(provider, {})
-        role = "tool" if complexity["requires_tools"] else "text"
-        return {"provider": provider, "model": models.get(role + "_model", models.get("text_model")),
-                "vision_model": cfg.get("gemini", {}).get("vision_model"),
-                "complexity_level": complexity["level"], "reasoning_depth": complexity["reasoning_depth"],
-                "estimated_tokens": complexity["estimated_tokens"], "requires_tools": complexity["requires_tools"],
-                "capabilities": {"supports_tools": True, "supports_vision": provider == "gemini"},
+        role = route.role
+        provider = None if role is None else ("gemini" if cfg.get("backend") == "gemini" else cfg.get("primary_provider", "groq"))
+        return {"provider": provider, "model": model_for(role, cfg) if role else None,
+                "role": role, "vision_model": cfg.get("gemini", {}).get("vision_model"),
+                "complexity_level": route.complexity, "reasoning_depth": route.steps,
+                "estimated_tokens": None, "requires_tools": route.kind != "conversation",
+                "capabilities": {"supports_tools": role is not None, "supports_vision": provider == "gemini"},
                 "hardware_info": {}}

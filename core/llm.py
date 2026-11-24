@@ -376,7 +376,7 @@ def web_context(query: str, n: int | None = None) -> str:
 
 def chat_raw(messages: list[dict], role: str = "text", tools: list[dict] | None = None,
              temperature: float | None = None, max_tokens: int | None = None,
-             model: str | None = None, json_mode: bool = False, *, on_delta=None, cancelled=None) -> dict:
+             model: str | None = None, json_mode: bool = False, *, on_delta=None, cancelled=None, provider_override=None) -> dict:
     """Send one chat request; optional text deltas use the same provider routing."""
     cfg = load_config()
     if cfg.get("profile") == "offline":
@@ -393,7 +393,13 @@ def chat_raw(messages: list[dict], role: str = "text", tools: list[dict] | None 
     cloud_messages = redact_messages(cloud_messages, cfg)
     if role == "vision" and not cfg.get("allow_cloud_vision", False):
         raise LLMUnavailable("Cloud vision is not authorized.")
-    if cfg.get("backend") == "gemini" or role == "vision":
+    if provider_override is not None and provider_override not in {"groq", "gemini"}:
+        raise LLMUnavailable("Unsupported cloud provider.")
+    if role == "vision" and provider_override not in (None, "gemini"):
+        raise LLMUnavailable("Vision requires the configured Gemini provider.")
+    if provider_override is not None:
+        order = [provider_override]
+    elif cfg.get("backend") == "gemini" or role == "vision":
         order = ["gemini"]
     else:
         primary = cfg.get("primary_provider", "groq")

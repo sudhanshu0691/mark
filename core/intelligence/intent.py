@@ -118,64 +118,22 @@ def assess_complexity(query: str, intent: Intent, extraction: Dict[str, Any]) ->
     return complexity
 
 
+def model_role(intent: Intent, complexity: Complexity, *, agentic: bool = False) -> str:
+    """Canonical model-role policy; vision actions first select a tool."""
+    if intent == Intent.CODE:
+        return "code"
+    if intent == Intent.VISION and not agentic:
+        return "vision"
+    if complexity in (Complexity.HIGH, Complexity.DEEP):
+        return "planning"
+    if intent == Intent.CONVERSATION and not agentic:
+        return "fast"
+    return "tool" if agentic else "text"
+
+
 def route_for_intent(intent: Intent, complexity: Complexity, available_models: Dict[str, str]) -> Tuple[str, Dict[str, Any]]:
-    """Route to appropriate model based on intent and available models."""
-    routing: Dict[str, Any] = {
-        "intent": intent.value,
-        "complexity": complexity.value,
-    }
-    model_pref = "efficient"
-    if intent == Intent.CONVERSATION:
-        if model_pref == "efficient":
-            model = available_models.get("fast", list(available_models.values())[0] if available_models else "")
-        elif model_pref == "small":
-            model = available_models.get("fast", list(available_models.values())[0] if available_models else "")
-        else:
-            model = available_models.get("text", list(available_models.values())[0] if available_models else "")
-        routing["reasoning_depth"] = "minimal"
-    elif intent == Intent.COMMAND:
-        if model_pref in ("large", "medium"):
-            model = available_models.get("code", list(available_models.values())[0] if available_models else "")
-        else:
-            model = available_models.get("fast", list(available_models.values())[0] if available_models else "")
-        routing["reasoning_depth"] = "standard"
-    elif intent == Intent.CODE:
-        model = available_models.get("code", list(available_models.values())[0] if available_models else "")
-        routing["reasoning_depth"] = "deep"
-    elif intent == Intent.VISION:
-        model = available_models.get("vision", list(available_models.values())[0] if available_models else "")
-        routing["reasoning_depth"] = "standard"
-    elif intent == Intent.RESEARCH:
-        if model_pref == "large":
-            model = available_models.get("code", list(available_models.values())[0] if available_models else "")
-        else:
-            model = available_models.get("text", list(available_models.values())[0] if available_models else "")
-        routing["reasoning_depth"] = "deep"
-    elif intent == Intent.AUTOMATION:
-        if complexity == Complexity.LOW:
-            model = available_models.get("fast", list(available_models.values())[0] if available_models else "")
-        else:
-            model = available_models.get("code", list(available_models.values())[0] if available_models else "")
-        routing["reasoning_depth"] = "standard"
-    elif intent == Intent.PRODUCTIVITY:
-        if model_pref == "efficient":
-            model = available_models.get("fast", list(available_models.values())[0] if available_models else "")
-        else:
-            model = available_models.get("text", list(available_models.values())[0] if available_models else "")
-        routing["reasoning_depth"] = "standard"
-    elif intent == Intent.SYSTEM_MGMT:
-        model = available_models.get("fast", list(available_models.values())[0] if available_models else "")
-        routing["reasoning_depth"] = "minimal"
-    elif intent == Intent.MEMORY_QUERY:
-        model = available_models.get("text", list(available_models.values())[0] if available_models else "")
-        routing["reasoning_depth"] = "standard"
-    elif intent == Intent.SETTINGS:
-        model = available_models.get("fast", list(available_models.values())[0] if available_models else "")
-        routing["reasoning_depth"] = "minimal"
-    else:
-        model = available_models.get("text", list(available_models.values())[0] if available_models else "")
-        routing["reasoning_depth"] = "standard"
-    if not model and available_models:
-        model = list(available_models.values())[0]
-    routing["model"] = model
-    return model, routing
+    role = model_role(intent, complexity)
+    model = available_models.get(role) or available_models.get("text", "")
+    return model, {"intent": intent.value, "complexity": complexity.value,
+                   "role": role, "model": model,
+                   "reasoning_depth": "deep" if complexity in (Complexity.HIGH, Complexity.DEEP) else "standard"}

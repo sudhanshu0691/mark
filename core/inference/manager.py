@@ -12,6 +12,7 @@ from core.intelligence.intent import (
     assess_complexity,
     Intent,
     Complexity,
+    model_role,
 )
 from core.intelligence.complexity import ComplexityAnalyzer
 from core.llm import load_config
@@ -63,7 +64,6 @@ class InferenceManager:
             "complexity": complexity.value,
             "model": model,
             "reasoning_depth": "standard",
-            "extraction": extraction,
         }
         self._record_routing(routing_decision)
 
@@ -88,6 +88,8 @@ class InferenceManager:
                 max_tokens=None,
             )
 
+            if not response.get("content") and not response.get("tool_calls"):
+                raise ValueError("Empty inference result")
             result = {
                 "status": "completed",
                 "response": response.get("content", ""),
@@ -106,12 +108,12 @@ class InferenceManager:
             logging.error("Inference error: %s", type(e).__name__)
             return {
                 "status": "failed",
-                "response": f"I encountered an error: {str(e)}",
+                "response": f"Inference failed ({type(e).__name__}).",
                 "model": model or "text",
                 "intent": intent,
                 "complexity": complexity,
                 "auto_routed": False,
-                "error": str(e),
+                "error": type(e).__name__,
             }
 
     def _select_model(self, intent: Intent, complexity: Complexity) -> str:
@@ -120,19 +122,7 @@ class InferenceManager:
         if model:
             return model
         
-        # Default model selection
-        if intent == Intent.CONVERSATION and complexity == Complexity.LOW:
-            return "fast"
-        elif intent == Intent.CODE:
-            return "code"
-        elif intent == Intent.VISION:
-            return "vision"
-        elif complexity == Complexity.DEEP:
-            return "planning"
-        elif complexity == Complexity.HIGH:
-            return "tool"
-        else:
-            return "text"
+        return model_role(intent, complexity)
 
     def _prepare_messages(
         self,

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from core import brain, llm
 from core.agents import for_tool
 from core.intent import is_conversation, match_local_command
-from core.intelligence.intent import classify_intent, assess_complexity, Intent, Complexity
+from core.intelligence.intent import classify_intent, assess_complexity, Complexity, model_role
 from memory.conversation import build_turn_context
 
 @dataclass(frozen=True)
@@ -27,8 +27,7 @@ def select_route(text):
         return Route("conversation", "fast", "low", 0)
     intent, _, extracted = classify_intent(text)
     complexity = assess_complexity(text, intent, extracted)
-    role = "code" if intent == Intent.CODE else (
-        "planning" if complexity in (Complexity.HIGH, Complexity.DEEP) else "tool")
+    role = model_role(intent, complexity, agentic=True)
     # Vision requests select a tool first; the image tool itself owns vision consent.
     steps = brain.MAX_STEPS_DEFAULT
     if complexity == Complexity.LOW:
