@@ -27,7 +27,7 @@ jobs:
           tests/test_local_routing.py tests/test_memory_db.py
           tests/test_master_orchestrator.py
           tests/test_plugin_permissions.py tests/test_plugin_timeout.py
-          tests/test_brain_verify.py tests/test_shared_routing.py
+          tests/test_brain_verify.py tests/test_shared_routing.py tests/test_plugin_process.py
   windows:
     runs-on: windows-latest
     timeout-minutes: 25

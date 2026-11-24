@@ -87,6 +87,7 @@ class _Loaded:
         self.capabilities = list(self.metadata.get("capabilities", []))
         self.timeout = max(0.1, min(float(self.metadata.get("timeout", 30)), 300))
         self.health = "unknown"
+        self.isolated = self.metadata.get("execution") == "process"
 
 
 class PluginManager:
@@ -259,6 +260,8 @@ class PluginManager:
         if fn is None or owner is None:
             return f"[FAILED] plugin tool '{name}' not found"
         from core.plugin_safety import check_call, verify_result
+        if not isinstance(args, dict):
+            return "[FAILED] Plugin arguments must be an object"
         error = check_call(name, args)
         if error:
             self.ctx.log(f"{name}: blocked: {error}")
@@ -280,6 +283,9 @@ class PluginManager:
                 return "[FAILED] Plugin workers are busy"
             context = self._context_for(owner)
             def invoke():
+                if owner.isolated:
+                    from core.plugin_process import run_isolated
+                    return run_isolated(owner.path, name, args, owner.timeout, context.cancelled)
                 nparams = len(inspect.signature(fn).parameters)
                 return fn(args, context) if nparams >= 2 else fn(args)
             future = self._pool.submit(invoke)
@@ -291,7 +297,7 @@ class PluginManager:
                         self._inflight.pop(owner.name, None)
             future.add_done_callback(finished)
         try:
-            res = future.result(timeout=owner.timeout)
+            res = future.result(timeout=owner.timeout + 3 if owner.isolated else owner.timeout)
         except TimeoutError:
             context.cancelled.set()
             future.cancel()

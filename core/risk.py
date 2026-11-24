@@ -119,6 +119,8 @@ def requires_confirmation(tool: str, args: dict | None = None) -> bool:
 def validate_arguments(declaration, args):
     if declaration is None:
         return "Unknown tool."
+    if not isinstance(args, dict):
+        return "Arguments must be an object."
     schema = declaration.get("parameters") or {}
     fields = schema.get("properties") or {}
     for key in schema.get("required", []):
