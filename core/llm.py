@@ -376,8 +376,8 @@ def web_context(query: str, n: int | None = None) -> str:
 
 def chat_raw(messages: list[dict], role: str = "text", tools: list[dict] | None = None,
              temperature: float | None = None, max_tokens: int | None = None,
-             model: str | None = None, json_mode: bool = False) -> dict:
-    """Send one chat request to the configured provider."""
+             model: str | None = None, json_mode: bool = False, *, on_delta=None, cancelled=None) -> dict:
+    """Send one chat request; optional text deltas use the same provider routing."""
     cfg = load_config()
     if cfg.get("profile") == "offline":
         raise LLMUnavailable("Cloud inference is disabled in offline profile.")
@@ -401,7 +401,14 @@ def chat_raw(messages: list[dict], role: str = "text", tools: list[dict] | None 
         if cfg.get("automatic_fallback", True):
             order += cfg.get("fallback_providers", ["gemini"])
     failures = []
+    emitted = False
+    def emit(delta):
+        nonlocal emitted
+        emitted = True
+        on_delta(delta)
     for provider in dict.fromkeys(order):
+        if cancelled and cancelled():
+            raise LLMUnavailable("Inference cancelled.")
         if provider not in {"groq", "gemini"}:
             continue
         if provider == "groq" and role == "vision":
@@ -414,13 +421,17 @@ def chat_raw(messages: list[dict], role: str = "text", tools: list[dict] | None 
                 if cfg.get("free_tier_only", True) and name not in cfg.get("verified_free_models", []):
                     raise LLMUnavailable("Gemini model is not on the configured allowlist.")
                 return _run_provider("gemini", _gemini_chat, cloud_messages, role, tools, temperature, max_tokens, json_mode)
+            if on_delta is not None and not tools and not json_mode:
+                return _run_provider("groq", _groq_chat, cloud_messages, role, tools, temperature, max_tokens, json_mode, emit, cancelled)
             return _run_provider("groq", _groq_chat, cloud_messages, role, tools, temperature, max_tokens, json_mode)
         except (LLMUnavailable, providers.BudgetExceeded) as exc:
+            if emitted or (cancelled and cancelled()):
+                raise
             failures.append(f"{provider}: {exc}")
     raise LLMUnavailable("Cloud inference unavailable: " + "; ".join(failures))
 
 
-def _groq_chat(messages, role, tools, temperature, max_tokens, json_mode):
+def _groq_chat(messages, role, tools, temperature, max_tokens, json_mode, on_delta=None, cancelled=None):
     from core.secrets import get_secret
     cfg = load_config()
     models = cfg.get("providers", {}).get("groq", {})
@@ -462,6 +473,32 @@ def _groq_chat(messages, role, tools, temperature, max_tokens, json_mode):
     start = time.monotonic()
     try:
         with providers.cloud_request("groq", cfg):
+            if on_delta is not None:
+                chunks = []
+                first_ms = None
+                tokens = 0
+                stream = client.chat.completions.create(**payload, stream=True)
+                try:
+                    for event in stream:
+                        if cancelled and cancelled():
+                            raise LLMUnavailable("Inference cancelled.")
+                        usage = getattr(event, "usage", None)
+                        if usage:
+                            tokens = getattr(usage, "total_tokens", 0) or tokens
+                        choices = getattr(event, "choices", [])
+                        delta = getattr(choices[0].delta, "content", None) if choices else None
+                        if delta:
+                            if first_ms is None:
+                                first_ms = round((time.monotonic()-start)*1000)
+                            chunks.append(delta)
+                            on_delta(delta)
+                finally:
+                    stream.close()
+                content = _clean("".join(chunks))
+                if not content:
+                    raise LLMUnavailable("Groq returned an empty stream.")
+                providers.record("groq", name, start, tokens=tokens, first_ms=first_ms)
+                return {"role": "assistant", "content": content}
             response = client.chat.completions.create(**payload)
         message = response.choices[0].message
         providers.record("groq", name, start, tokens=getattr(response.usage, "total_tokens", 0))
@@ -469,7 +506,7 @@ def _groq_chat(messages, role, tools, temperature, max_tokens, json_mode):
         if message.tool_calls:
             result["tool_calls"] = [call.model_dump(exclude_none=True) for call in message.tool_calls]
         return result
-    except providers.BudgetExceeded:
+    except (LLMUnavailable, providers.BudgetExceeded):
         raise
     except Exception as exc:
         status = getattr(exc, "status_code", 0) or 0
