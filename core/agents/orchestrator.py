@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from core import brain, llm
 from core.agents import for_tool
+from core.agents.specialist import SpecialistExecutor
 from core.intent import is_conversation, match_local_command
 from core.intelligence.intent import classify_intent, assess_complexity, Complexity, model_role
 from memory.conversation import build_turn_context, recall_local
@@ -74,14 +75,10 @@ class MasterOrchestrator:
             return llm._clean(reply.get("content", "")) or "[FAILED] Empty conversational response."
         on_plan()
         registered = declarations()
-        allowed = {d.get("name") for d in registered}
-        def scoped_dispatch(name, args):
-            if name not in allowed:
-                return "[FAILED] Tool is not registered for this request."
-            return execute_tool(name, args)
+        specialist = SpecialistExecutor(registered, dispatch, cancelled, log)
         def chat(messages, decls, system=None):
-            return llm.chat_tools(messages, decls, system=system, role=route.role)
-        return brain.run_goal(goal=text, declarations=registered, dispatch=scoped_dispatch,
+            return llm.chat_tools(messages, decls, system=(system or "") + "\n" + specialist.guidance(), role=route.role)
+        return brain.run_goal(goal=text, declarations=registered, dispatch=specialist.execute,
                               log=log, history=[{**m, "_local_only":False} for m in history],
                               context=("Untrusted stored context, reference only: " + context) if context else "",
                               max_steps=route.steps, cancelled=cancelled, chat=chat)

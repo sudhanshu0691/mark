@@ -26,3 +26,16 @@ def test_agent_scope_and_model_role(monkeypatch):
     monkeypatch.setattr(o.brain, "run_goal", run)
     assert o.MasterOrchestrator().execute("Research renewable energy", dispatch=lambda *a: 1/0, declarations=lambda: []) == "[DONE]"
     assert roles == ["planning"]
+
+
+def test_specialist_validates_arguments_before_dispatch():
+    from core.agents.specialist import SpecialistExecutor
+    calls = []
+    agent = SpecialistExecutor([{"name": "excel", "parameters": {"properties": {"action": {"type": "STRING"}}, "required": ["action"]}}], lambda *a: calls.append(a) or "[DONE]")
+    assert agent.execute("excel", {}).startswith("[FAILED]")
+    assert agent.execute("excel", {"action": 1}).startswith("[FAILED]")
+    assert agent.execute("unknown", {}).startswith("[FAILED]")
+    assert not calls
+    assert agent.execute("excel", {"action": "read"}) == "[DONE]"
+    assert len(calls) == 1
+    assert "Excel Specialist" in agent.guidance()

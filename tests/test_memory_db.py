@@ -106,3 +106,14 @@ def test_schema_initialized_once_per_database(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "other.db")
     db.init_db()
     assert len(calls) == 2
+
+
+def test_natural_language_local_recall(tmp_path, monkeypatch):
+    from memory import db, conversation
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "natural.db")
+    monkeypatch.setattr(db, "LEGACY_LONG_TERM", tmp_path / "missing-long.json")
+    monkeypatch.setattr(db, "LEGACY_CONVERSATION", tmp_path / "missing-history.json")
+    cid = db.start_conversation("test")
+    db.append_conversation_turn("orchid project", "saved answer", conversation_id=cid)
+    assert "saved answer" in conversation.recall_local("What did we discuss about orchid?", conversation_id=cid)
+    assert conversation.recall_local("Open orchid file", conversation_id=cid) is None

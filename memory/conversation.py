@@ -232,6 +232,11 @@ def build_turn_context(query, *, conversation_id=None, share_cloud=False):
     from memory import db
     from memory.memory_manager import load_memory, format_memory_for_prompt
     from core.cloud_privacy import redact_text
+    if conversation_id is None:
+        active = db.get_active_conversation()
+        conversation_id = active["id"] if active else None
+    if conversation_id is None:
+        return [], ""
     history = recent_messages(conversation_id=conversation_id)
     seen = {(m["role"], m["content"]) for m in history}
     snippets = []
@@ -240,6 +245,7 @@ def build_turn_context(query, *, conversation_id=None, share_cloud=False):
             snippets.append({"user": turn["user"][:400], "assistant": turn["assistant"][:500]})
     facts = format_memory_for_prompt(load_memory())[:1500]
     context = json.dumps({"stored_facts": facts, "relevant_earlier_turns": snippets}, ensure_ascii=False)
+    history = [{**msg, "content": redact_text(msg["content"])} for msg in history]
     return history, redact_text(context[:4000])
 
 
@@ -255,6 +261,8 @@ def recall_local(query: str, *, conversation_id=None):
               "maine last kya kaha", "maine kya kaha tha", "pichli baat batao",
               "pichli conversation batao", "last conversation batao"}
     match = re.fullmatch(r"(?:search (?:my )?(?:conversation|chat) history for|recall conversation about|history search|purani chat mein dhundo)\s*[: ]\s*(.+)", query, re.I)
+    if match is None:
+        match = re.fullmatch(r"(?:what did (?:i|we) (?:say|discuss|talk) about|do you remember what (?:i|we) (?:said|discussed) about|what was our discussion about|(?:maine|humne) (?:kya kaha|kya discuss kiya) tha(?: about)?|yaad hai)\s+(.+?)[?.!]*", query, re.I)
     if normalized not in recent and match is None:
         return None
     if conversation_id is None:
