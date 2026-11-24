@@ -50,6 +50,7 @@ RISK_MAP.update({
     "window_manager": {"close": DESTRUCTIVE, "*": WRITE},
     "shutdown_mark": {"*": DESTRUCTIVE},
     "screen_process": {"*": EXTERNAL},
+    "save_memory": {"*": EXTERNAL},
     "screen_read": {"ask": EXTERNAL},
 })
 

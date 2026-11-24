@@ -240,7 +240,9 @@ def build_turn_context(query, *, conversation_id=None, share_cloud=False):
     history = recent_messages(conversation_id=conversation_id)
     seen = {(m["role"], m["content"]) for m in history}
     snippets = []
-    for turn in db.search_conversation_turns(query, conversation_id=conversation_id, limit=4):
+    for turn in db.search_conversation_turns(
+        query, conversation_id=conversation_id, limit=4, include_pending=False,
+    ):
         if ("user", turn["user"][:800]) not in seen:
             snippets.append({"user": turn["user"][:400], "assistant": turn["assistant"][:500]})
     facts = format_memory_for_prompt(load_memory())[:1500]

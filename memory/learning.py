@@ -17,7 +17,7 @@ def learn_explicit_preference(text):
             value = match.group(1)
             if redact_text(value) == value:
                 db.upsert_fact(category, key, {"हिंदी": "hindi", "अंग्रेजी": "english",
-                                               "हिंग्लिश": "hinglish"}.get(value, value.casefold()))
+                                               "हिंग्लिश": "hinglish"}.get(value, value.casefold()), source="user_explicit")
                 return True
     return False
 
@@ -42,7 +42,7 @@ def handle_memory_command(text):
             return f"[FAILED] {error}"
         if re.search(r"(?i)\b(?:ssn|aadhaar|aadhar|medical|diagnosis|passport|bank account)\b", key + " " + value):
             return "[FAILED] Store sensitive personal details using a trusted local record."
-        db.upsert_fact("notes", key, value)
+        db.upsert_fact("notes", key, value, source="user_explicit")
         return "[DONE] Note saved locally."
     match = _FORGET.fullmatch(normalized)
     if match:

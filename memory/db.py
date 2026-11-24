@@ -100,6 +100,11 @@ def init_db() -> None:
             );
             """)
             _ensure_columns(conn)
+            facts_columns = {row[1] for row in conn.execute("PRAGMA table_info(memory_facts)")}
+            if "source" not in facts_columns:
+                conn.execute("ALTER TABLE memory_facts ADD COLUMN source TEXT NOT NULL DEFAULT 'legacy'")
+            if "confidence" not in facts_columns:
+                conn.execute("ALTER TABLE memory_facts ADD COLUMN confidence REAL")
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_turn_request ON conversation_turns(request_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_turns_conversation_id ON conversation_turns(conversation_id, id)")
             _ensure_default_conversation(conn)
@@ -396,8 +401,12 @@ def load_memory_dict() -> dict:
     with _lock:
         conn = _connect()
         try:
-            for cat, key, value, updated in conn.execute("SELECT category,key,value,updated FROM memory_facts"):
-                out.setdefault(cat, {})[key] = {"value": value, "updated": updated}
+            for cat, key, value, updated, source, confidence in conn.execute(
+                "SELECT category,key,value,updated,source,confidence FROM memory_facts"
+            ):
+                out.setdefault(cat, {})[key] = {
+                    "value": value, "updated": updated, "source": source, "confidence": confidence,
+                }
             for date, summary, language in conn.execute("SELECT date,summary,language FROM sessions ORDER BY id"):
                 entry = {"date": date, "summary": summary}
                 if language:
@@ -436,8 +445,11 @@ def save_memory_dict(memory: dict) -> None:
                         continue
                     updated = entry.get("updated") if isinstance(entry, dict) else None
                     conn.execute(
-                        "INSERT OR REPLACE INTO memory_facts(category,key,value,updated) VALUES (?,?,?,?)",
-                        (cat, str(key), str(val)[:380], str(updated or _dt.datetime.now().strftime("%Y-%m-%d"))),
+                        "INSERT OR REPLACE INTO memory_facts(category,key,value,updated,source,confidence) "
+                        "VALUES (?,?,?,?,?,?)",
+                        (cat, str(key), str(val)[:380], str(updated or _dt.datetime.now().strftime("%Y-%m-%d")),
+                         entry.get("source", "legacy") if isinstance(entry, dict) else "legacy",
+                         entry.get("confidence") if isinstance(entry, dict) else None),
                     )
             sessions = memory.get("sessions", []) if isinstance(memory, dict) else []
             if isinstance(sessions, list):
@@ -473,8 +485,7 @@ def validate_fact(key, value):
     return ""
 
 
-def upsert_fact(category, key, value):
-    import datetime as _dt
+def upsert_fact(category, key, value, *, source="local"):
     init_db()
     if category not in CATEGORIES:
         category = "notes"
@@ -485,10 +496,12 @@ def upsert_fact(category, key, value):
         conn = _connect()
         try:
             cur = conn.execute(
-                "INSERT INTO memory_facts(category,key,value,updated) VALUES (?,?,?,?) "
-                "ON CONFLICT(category,key) DO UPDATE SET value=excluded.value, updated=excluded.updated "
-                "WHERE value <> excluded.value",
-                (category, key, value, _dt.datetime.now().strftime("%Y-%m-%d")),
+                "INSERT INTO memory_facts(category,key,value,updated,source,confidence) VALUES (?,?,?,?,?,?) "
+                "ON CONFLICT(category,key) DO UPDATE SET value=excluded.value, updated=excluded.updated, "
+                "source=excluded.source, confidence=excluded.confidence "
+                "WHERE value <> excluded.value OR source <> excluded.source",
+                (category, key, value, datetime.now().isoformat(timespec="seconds"), source,
+                 1.0 if source in {"user_explicit", "user_confirmed"} else None),
             )
             conn.commit()
             return cur.rowcount > 0
@@ -678,7 +691,7 @@ def clear_conversation_turns():
             conn.close()
 
 
-def search_conversation_turns(query: str, *, conversation_id=None, limit=5):
+def search_conversation_turns(query: str, *, conversation_id=None, limit=5, include_pending=True):
     """Search only within one conversation, without sending data to a provider."""
     import re
     init_db()
@@ -698,19 +711,19 @@ def search_conversation_turns(query: str, *, conversation_id=None, limit=5):
                     rows = conn.execute(
                         "SELECT t.id,t.timestamp,t.user,t.assistant FROM conversation_turns_fts "
                         "JOIN conversation_turns t ON t.id=conversation_turns_fts.rowid "
-                        "WHERE conversation_turns_fts MATCH ? AND t.conversation_id=? "
+                        "WHERE conversation_turns_fts MATCH ? AND t.conversation_id=? AND (? OR t.pending=0) "
                         "ORDER BY bm25(conversation_turns_fts),t.id DESC LIMIT ?",
-                        (expression, conversation_id, limit)).fetchall()
+                        (expression, conversation_id, include_pending, limit)).fetchall()
                     return [{"id": i, "timestamp": ts, "user": u, "assistant": a} for i,ts,u,a in rows]
                 except sqlite3.OperationalError:
                     pass
             clauses = " OR ".join("(lower(user) LIKE ? OR lower(assistant) LIKE ?)" for _ in terms)
-            params = [conversation_id]
+            params = [conversation_id, include_pending]
             for term in terms:
                 params.extend(["%" + term + "%"] * 2)
             rows = conn.execute(
-                "SELECT id,timestamp,user,assistant FROM conversation_turns WHERE conversation_id=? AND (" +
-                clauses + ") ORDER BY id DESC LIMIT ?", (*params, limit)).fetchall()
+                "SELECT id,timestamp,user,assistant FROM conversation_turns "
+                "WHERE conversation_id=? AND (? OR pending=0) AND (" + clauses + ") ORDER BY id DESC LIMIT ?", (*params, limit)).fetchall()
             return [{"id": i, "timestamp": ts, "user": u, "assistant": a} for i,ts,u,a in rows]
         finally:
             conn.close()

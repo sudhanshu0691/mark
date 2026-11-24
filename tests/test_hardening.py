@@ -194,6 +194,12 @@ def test_conversation_checkpoint_is_idempotent_and_does_not_cross_conversations(
         "[Interrupted"
     )
     assert db.load_conversation_turns(conversation_id=cid, include_pending=False) == []
+    assert (
+        db.search_conversation_turns(
+            "hello", conversation_id=cid, include_pending=False
+        )
+        == []
+    )
     other = db.start_conversation()
     assert not db.checkpoint_conversation_turn(
         "turn", "different", channel="voice", conversation_id=other
@@ -337,3 +343,35 @@ def test_gemini_stream_closes_when_cancelled(monkeypatch):
         )
     assert seen == ["first"]
     assert closed.is_set()
+
+
+def test_structured_memory_keeps_provenance_and_supports_correction(
+    monkeypatch, tmp_path
+):
+    from memory.learning import handle_memory_command
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "memory.db")
+    monkeypatch.setattr(db, "LEGACY_LONG_TERM", tmp_path / "legacy.json")
+    monkeypatch.setattr(db, "LEGACY_CONVERSATION", tmp_path / "old-conversation.json")
+    assert handle_memory_command("yaad rakho editor=Vim").startswith("[DONE]")
+    assert handle_memory_command("remember editor=Neovim").startswith("[DONE]")
+    note = db.load_memory_dict()["notes"]["editor"]
+    assert (note["value"], note["source"], note["confidence"]) == (
+        "Neovim",
+        "user_explicit",
+        1,
+    )
+    assert handle_memory_command("remember api key=private").startswith("[FAILED]")
+    assert handle_memory_command("bhool jao editor").startswith("[DONE]")
+    assert "editor" not in db.load_memory_dict()["notes"]
+
+
+def test_repeated_specialist_write_is_not_dispatched_twice():
+    actions = []
+    specialist = SpecialistExecutor(
+        [{"name": "send_email"}],
+        lambda name, args: actions.append(name) or "[DONE]",
+    )
+    assert specialist.execute("send_email", {}) == "[DONE]"
+    assert specialist.execute("send_email", {}).startswith("[UNVERIFIED]")
+    assert actions == ["send_email"]
