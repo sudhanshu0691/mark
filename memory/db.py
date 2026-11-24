@@ -406,6 +406,15 @@ def load_memory_dict() -> dict:
 def save_memory_dict(memory: dict) -> None:
     import json as _json
     import datetime as _dt
+    # Validate before the replacement transaction so an invalid entry cannot
+    # erase existing facts or be copied into the legacy JSON mirror.
+    for cat in CATEGORIES:
+        items = memory.get(cat, {}) if isinstance(memory, dict) else {}
+        if isinstance(items, dict):
+            for key, entry in items.items():
+                value = entry.get("value") if isinstance(entry, dict) else entry
+                if value and validate_fact(key, str(value)):
+                    raise ValueError("Invalid or sensitive memory fact")
     init_db()
     with _lock:
         conn = _connect()
@@ -443,14 +452,30 @@ def save_memory_dict(memory: dict) -> None:
     except Exception:
         pass
 
+def validate_fact(key, value):
+    """Reject likely credentials before they enter persistent learned facts."""
+    import re
+    from core.cloud_privacy import redact_text
+    if (not isinstance(key, str) or not key.strip() or
+            not isinstance(value, str) or not value.strip()):
+        return "A non-empty memory key and value are required."
+    sensitive = (r"password|passwd|passphrase|api[ _-]?key|access[ _-]?token|"
+                 r"refresh[ _-]?token|client[ _-]?secret|private[ _-]?key|credential")
+    if re.search(rf"(?i)(?:{sensitive}|authorization)", key):
+        return "Credentials cannot be saved as learned facts."
+    if redact_text(value) != value or re.search(rf"(?i)\b(?:{sensitive})\b", value):
+        return "Credentials cannot be saved as learned facts."
+    return ""
+
+
 def upsert_fact(category, key, value):
     import datetime as _dt
     init_db()
     if category not in CATEGORIES:
         category = "notes"
-    value = (value or "").strip()[:380]
-    if not value:
+    if validate_fact(key, value):
         return False
+    value = value.strip()[:380]
     with _lock:
         conn = _connect()
         try:

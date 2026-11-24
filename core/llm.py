@@ -572,10 +572,11 @@ def vision(image: bytes, question: str, system: str | None = None, temperature: 
 
 
 def chat_tools(messages: list[dict], declarations: list[dict], system: str | None = None,
-               role: str = "text", temperature: float = 0.2) -> dict:
+               role: str = "text", temperature: float = 0.2, *, cancelled=None) -> dict:
     """Tool-calling turn for the brain. `messages` use the internal chat format and are NOT modified."""
     msgs = ([{"role": "system", "content": system}] if system else []) + list(messages)
-    msg = chat_raw(msgs, role=role, tools=to_provider_tools(declarations), temperature=temperature)
+    msg = chat_raw(msgs, role=role, tools=to_provider_tools(declarations),
+                   temperature=temperature, cancelled=cancelled)
     msg["content"] = _clean(msg.get("content", ""))
     return msg
 

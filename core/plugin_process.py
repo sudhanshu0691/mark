@@ -5,16 +5,18 @@ sandbox. Plugins still execute as the current user. No UI/tool bridge is passed.
 """
 from __future__ import annotations
 import contextlib
-import signal
 import importlib.util
 import inspect
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
 import time
+
+MAX_MESSAGE_BYTES = 1024 * 1024
 
 def _terminate(process):
     # Kill the process group on POSIX; Windows taskkill includes descendants.
@@ -41,7 +43,14 @@ def run_isolated(path, name, args, timeout, cancelled):
                "USERPROFILE", "HOME", "LOCALAPPDATA", "APPDATA", "SYSTEMDRIVE"}
     env = {k: v for k, v in os.environ.items() if k.upper() in allowed}
     env["PYTHONIOENCODING"] = "utf-8"
-    payload = json.dumps({"path": str(Path(path).resolve()), "name": name, "args": args})
+    try:
+        payload = json.dumps({
+            "path": str(Path(path).resolve()), "name": name, "args": args,
+        })
+    except (TypeError, ValueError, RecursionError):
+        return "[FAILED] Plugin request is not serializable."
+    if len(payload.encode("utf-8")) > MAX_MESSAGE_BYTES:
+        return "[FAILED] Plugin request exceeds size limit."
     with tempfile.TemporaryDirectory(prefix="mark-plugin-") as tmp:
         request = Path(tmp) / "request.json"
         response = Path(tmp) / "response.json"
@@ -60,9 +69,13 @@ def run_isolated(path, name, args, timeout, cancelled):
                 cancelled.wait(0.025)
             if process.returncode != 0 or not response.is_file():
                 return "[FAILED] Isolated plugin worker crashed."
-            if response.stat().st_size > 1024 * 1024:
+            if response.stat().st_size > MAX_MESSAGE_BYTES:
                 return "[FAILED] Plugin result exceeds size limit."
-            return str(json.loads(response.read_text(encoding="utf-8"))["result"])
+            try:
+                data = json.loads(response.read_text(encoding="utf-8"))
+                return str(data["result"])
+            except (ValueError, KeyError, TypeError, OSError):
+                return "[FAILED] Invalid plugin worker response."
         finally:
             if process.poll() is None:
                 _terminate(process)
@@ -85,7 +98,10 @@ def _worker(request, response):
     ctx = PluginContext()
     result = fn(data["args"], ctx) if len(inspect.signature(fn).parameters) >= 2 else fn(data["args"])
     out = result.to_llm() if isinstance(result, ActionResult) else str(result or "")
-    Path(response).write_text(json.dumps({"result": out}), encoding="utf-8")
+    payload = json.dumps({"result": out})
+    if len(payload.encode("utf-8")) > MAX_MESSAGE_BYTES:
+        payload = json.dumps({"result": "[FAILED] Plugin result exceeds size limit."})
+    Path(response).write_text(payload, encoding="utf-8")
 
 if __name__ == "__main__":
     _worker(sys.argv[1], sys.argv[2])

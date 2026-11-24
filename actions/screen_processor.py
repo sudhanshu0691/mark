@@ -76,8 +76,11 @@ def _get_api_key() -> str:
 def _get_os() -> str:
     return _load_config().get("os_system", "windows").lower()
 
-from core.llm import load_config as _load_llm_config
-_LIVE_MODEL = "models/" + _load_llm_config().get("gemini", {}).get("live_model", "")
+def _live_model():
+    from core.llm import load_config
+    return "models/" + load_config().get("gemini", {}).get("live_model", "")
+
+
 _CHANNELS           = 1
 _RECEIVE_SAMPLE_RATE = 24_000
 _CHUNK_SIZE         = 1_024
@@ -331,7 +334,7 @@ class _VisionSession:
             try:
                 print("[Vision] 🔌 Connecting...")
                 async with client.aio.live.connect(
-                    model=_LIVE_MODEL, config=config
+                    model=_live_model(), config=config
                 ) as session:
                     self._session = session
                     self._ready_evt.set()

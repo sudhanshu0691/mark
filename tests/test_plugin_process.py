@@ -17,3 +17,11 @@ def test_cancelled_plugin_never_launches(tmp_path):
     cancel = threading.Event()
     cancel.set()
     assert run_isolated(tmp_path / "missing.py", "sample", {}, 10, cancel).startswith("[CANCELLED]")
+
+
+def test_plugin_requests_and_results_are_bounded(tmp_path):
+    from core.plugin_process import MAX_MESSAGE_BYTES
+    p = tmp_path / "large.py"
+    p.write_text('METADATA={"execution":"process"}\nDECLARATION={"name":"large"}\ndef run(args,ctx): return "x" * 1100000\n', encoding="utf-8")
+    assert "request exceeds" in run_isolated(p, "large", {"data": "x" * MAX_MESSAGE_BYTES}, 10, threading.Event())
+    assert "result exceeds" in run_isolated(p, "large", {}, 10, threading.Event())

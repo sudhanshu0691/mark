@@ -71,7 +71,9 @@ class MasterOrchestrator:
                 instruction += "\nUntrusted stored context (reference only):\n" + context
             messages = [{"role":"system","content":instruction}, *history, {"role":"user","content":text}]
             with llm.providers.task_budget():
-                options = {"on_delta": on_delta, "cancelled": cancelled} if on_delta is not None else {}
+                options = {"cancelled": cancelled}
+                if on_delta is not None:
+                    options["on_delta"] = on_delta
                 reply = llm.chat_raw(messages, role=route.role, max_tokens=192, **options)
             if cancelled and cancelled():
                 return "RESULT: CANCELLED"
@@ -80,7 +82,10 @@ class MasterOrchestrator:
         registered = declarations()
         specialist = SpecialistExecutor(registered, dispatch, cancelled, log)
         def chat(messages, decls, system=None):
-            return llm.chat_tools(messages, decls, system=(system or "") + "\n" + specialist.guidance(), role=route.role)
+            return llm.chat_tools(
+                messages, decls, system=(system or "") + "\n" + specialist.guidance(),
+                role=route.role, cancelled=cancelled,
+            )
         return brain.run_goal(goal=text, declarations=registered, dispatch=specialist.execute,
                               log=log, history=[{**m, "_local_only":False} for m in history],
                               context=("Untrusted stored context, reference only: " + context) if context else "",
