@@ -51,9 +51,7 @@ logger = logging.getLogger(__name__)
 # LiveKit imports for real-time communication
 try:
     livekit_api = importlib.import_module("livekit.api")
-    importlib.import_module("livekit.agents")
-    importlib.import_module("livekit.agents.pipeline")
-    importlib.import_module("livekit.plugins")
+    importlib.import_module("livekit.rtc")
     LIVEKIT_AVAILABLE = True
 except ImportError:
     livekit_api = None
@@ -861,9 +859,20 @@ class MarkLive:
                 tts_engine=tts_engine,
             )
 
-            # Worker.start requires an already connected room and participant.
-            # Do not report a connection until that integration is implemented.
-            raise NotImplementedError("LiveKit room connection is not implemented")
+            from livekit import rtc
+            allowed = os.environ.get("LIVEKIT_REMOTE_IDENTITY", "").strip()
+            if not allowed or allowed == participant_name:
+                raise ValueError("Set LIVEKIT_REMOTE_IDENTITY to the authorized remote participant")
+            self._livekit_worker.allowed_identity = allowed
+            room = rtc.Room()
+            try:
+                await room.connect(livekit_cfg["url"], self._livekit_token)
+                await self._livekit_worker.start(room, room.local_participant)
+            except BaseException:
+                await room.disconnect()
+                raise
+            self._livekit_connected = True
+            return True
 
         except Exception as e:
             logger.error(f"Failed to connect to LiveKit: {e}", exc_info=True)
@@ -2163,6 +2172,16 @@ class MarkLive:
         self._push_hud_counts()
         while True:
             cfg = _llm_config.load_config()
+            if cfg.get("voice_transport") == "livekit" and cfg["profile"] != "offline":
+                if not self._livekit_worker or not self._livekit_worker._is_running:
+                    await self.disconnect_livekit()
+                    if not await self.connect_livekit():
+                        await asyncio.sleep(5)
+                        continue
+                await asyncio.sleep(1)
+                continue
+            if getattr(self, "_livekit_connected", False):
+                await self.disconnect_livekit()
             if self._live_disabled or cfg["profile"] in {"offline", "low_resource"}:
                 await asyncio.sleep(3)
                 continue
