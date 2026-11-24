@@ -407,3 +407,20 @@ def test_workflow_binds_analysis_only_to_literal_presentation_content(monkeypatc
     )
     assert result.startswith("[FAILED]")
     assert len(calls) == 1
+
+
+def test_recovery_claim_replays_only_known_reads(tmp_path, monkeypatch):
+    from core.task_manager import TaskManager
+
+    monkeypatch.setattr("core.task_manager._EVENT_LOG", tmp_path / "audit.jsonl")
+    database = tmp_path / "tasks.db"
+    original = TaskManager(database=database)
+    original.start(1, "system_status")
+    original.start(2, "send_email", {"body": "private"})
+    original.start(3, "runtime_status", {"unexpected": "private"})
+    resumed = TaskManager(database=database)
+    assert resumed.claim_recovered_read(2) is None
+    assert resumed.claim_recovered_read(3) is None
+    assert resumed.claim_recovered_read(1) == "system_status"
+    assert resumed.claim_recovered_read(1) is None
+    assert TaskManager(database=database).claim_recovered_read(1) is None

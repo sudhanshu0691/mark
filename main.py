@@ -1369,7 +1369,14 @@ class MarkLive:
                 result = await loop.run_in_executor(None, lambda: self.plugins.run(name, excel_args))
 
             elif self.plugins.has_tool(name):
+                sandboxed = self.plugins.is_sandboxed(name) is True
                 result = await loop.run_in_executor(None, lambda: self.plugins.run(name, args))
+                if sandboxed:
+                    from core.cloud_privacy import redact_text
+
+                    self.ui.write_log(redact_text(str(result))[:5000])
+                    tag = next((tag for tag in ("[FAILED]", "[CANCELLED]") if str(result).startswith(tag)), "[UNVERIFIED]")
+                    result = tag + " Isolated plugin output is available locally."
 
             elif name == "open_app":
                 r = await loop.run_in_executor(None, lambda: open_app(parameters=args, response=None, player=self.ui))

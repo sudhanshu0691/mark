@@ -28,6 +28,13 @@ def test_workbook_sheet_range_table_and_dropdown(tmp_path):
     run("dropdown", range="A2:A3", choices=["Desk", "Chair"])
     run("copy_sheet", target_sheet="Archive")
     run("rename_sheet", sheet="Archive", target_sheet="Previous")
+    from openpyxl import Workbook
+    other = Workbook()
+    other.active.append(["External", 25])
+    source = tmp_path / "source.xlsx"
+    other.save(source)
+    other.close()
+    run("copy_values", source=str(source), source_range="A1:B1", range="A4:B4")
     run("dashboard", group_by="Item", column="Amount")
     run("export_csv", sheet="Data")
     assert (tmp_path / "report.csv").read_text(encoding="utf-8-sig").splitlines()[1] == "Desk,15"
@@ -36,6 +43,7 @@ def test_workbook_sheet_range_table_and_dropdown(tmp_path):
         assert workbook.sheetnames == ["Data", "Previous", "Dashboard"]
         assert len(workbook["Dashboard"]._charts) == 1
         assert workbook["Data"]["B3"].value == 20
+        assert workbook["Data"]["A4"].value == "External"
         assert "Inventory" in workbook["Data"].tables
         assert len(workbook["Data"].data_validations.dataValidation) == 1
     finally:

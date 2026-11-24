@@ -35,7 +35,7 @@ DECLARATION = {
         "formula, format, sort, remove_duplicates, summary, chart, recalculate. "
         "Also supports add_sheet, delete_sheet, rename_sheet, copy_sheet, set_range, "
         "insert_rows, delete_rows, insert_columns, delete_columns, merge, unmerge, style, "
-        "dropdown, conditional_format, table, filter, import_csv, export_csv, to_pdf, pivot, dashboard. "
+        "dropdown, conditional_format, table, filter, import_csv, export_csv, copy_values, to_pdf, pivot, dashboard. "
         "Existing workbooks are backed up before edits."
     ),
     "parameters": {
@@ -59,6 +59,8 @@ DECLARATION = {
             "index": {"type": "INTEGER"},
             "count": {"type": "INTEGER"},
             "source": {"type": "STRING"},
+            "source_sheet": {"type": "STRING"},
+            "source_range": {"type": "STRING"},
             "destination": {"type": "STRING"},
             "choices": {"type": "ARRAY", "items": {"type": "STRING"}},
             "options": {"type": "OBJECT", "properties": {
@@ -213,7 +215,7 @@ def _style_sheet(ws) -> None:
 _EXTRA_EDITS = {"add_sheet", "delete_sheet", "rename_sheet", "copy_sheet", "set_range",
                 "insert_rows", "delete_rows", "insert_columns", "delete_columns",
                 "merge", "unmerge", "style", "dropdown", "conditional_format", "table",
-                "filter", "import_csv", "dashboard"}
+                "filter", "import_csv", "dashboard", "copy_values"}
 
 
 def _check_unlocked(path):
@@ -305,15 +307,36 @@ def _edit(wb, ws, action, args):
     ):
         raise ValueError("Invalid or excessive cell range.")
 
-    if action == "set_range":
+    if action in {"set_range", "copy_values"}:
         data = args.get("data") or []
+        if action == "copy_values":
+            source = permitted(args["source"])
+            if source.suffix.lower() not in _EXCEL_EXTS:
+                raise ValueError("Source must be an Excel workbook.")
+            source_left, source_top, source_right, source_bottom = range_boundaries(args["source_range"])
+            if (not all((source_left, source_top, source_right, source_bottom))
+                    or source_right - source_left != right - left
+                    or source_bottom - source_top != bottom - top):
+                raise ValueError("Source and destination ranges must have matching dimensions.")
+            if not 1 <= source_left <= source_right <= 16_384 or not 1 <= source_top <= source_bottom <= _MAX_ROWS:
+                raise ValueError("Source range exceeds the supported worksheet bounds.")
+            workbook = _openpyxl().load_workbook(source, data_only=True, read_only=True)
+            try:
+                data = [list(row) for row in _sheet(workbook, args.get("source_sheet")).iter_rows(
+                    min_row=source_top, max_row=source_bottom, min_col=source_left, max_col=source_right, values_only=True,
+                )]
+            finally:
+                workbook.close()
         if len(data) != bottom - top + 1 or any(
             not isinstance(row, list) or len(row) != right - left + 1 for row in data
         ):
             raise ValueError("Data dimensions must match the target range.")
         for i, row in enumerate(data, top):
             for j, value in enumerate(row, left):
-                ws.cell(i, j).value = value
+                target = ws.cell(i, j)
+                target.value = value
+                if action == "copy_values" and isinstance(value, str):
+                    target.data_type = "s"
     elif action == "merge":
         ws.merge_cells(cell_range)
     elif action == "unmerge":

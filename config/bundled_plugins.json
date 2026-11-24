@@ -3,7 +3,7 @@
   "calc_tools.py": "39803a431ffd3104940de5ccef8cac18db2b8f2e33885eeade16dd192f85d3ad",
   "clipboard_tools.py": "c2736779ce8a402376cfa5342eacc4231e37a6f7edf1f4f0661a991090780f33",
   "email_plugin.py": "1c55122f6c4abbd0ac762a160ba0f51a92c9de5637a2221c72ecdd8a4f1e09e5",
-  "excel/plugin.py": "5be37e4fabc77642cba66e7dde824a9c3b1e31cf8252bd0c67838237912be65d",
+  "excel/plugin.py": "5eb04ee60f031a95f7064f64eabec599241e70d74b37c2614f929764f8857b01",
   "hardware_control.py": "110428ae38384b8739f564116b10ef61fec6cea87b40ff76ec57282779b8b3ac",
   "media_studio.py": "c9653bbcdf191fe7e8451572654d8897e8bae6e6a578cf68e64c77d0935f8df6",
   "message_delivery.py": "40a434c0391ded82b0f6d77976db2482f7d11a3a842cf2381bb389765da69d2e",

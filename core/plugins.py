@@ -330,6 +330,10 @@ class PluginManager:
         with self._lock:
             return any(name in l.tools for l in self.loaded.values())
 
+    def is_sandboxed(self, name):
+        with self._lock:
+            return any(item.sandboxed and name in item.tools for item in self.loaded.values())
+
     def tool_names(self) -> list[str]:
         return [d["name"] for d in self.declarations()]
 

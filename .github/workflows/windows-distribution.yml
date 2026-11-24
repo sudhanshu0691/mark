@@ -6,6 +6,12 @@ on:
     branches: [main, 'codex/**']
     paths:
       - 'packaging/**'
+      - 'main.py'
+      - 'ui.py'
+      - 'core/**'
+      - 'actions/**'
+      - 'plugins/**'
+      - 'memory/**'
       - 'setup_windows.bat'
       - 'run_mark.bat'
       - 'pyproject.toml'

@@ -45,6 +45,21 @@ class MasterOrchestrator:
             return "[FAILED] Empty request."
         if cancelled and cancelled():
             return "RESULT: CANCELLED"
+        import re
+
+        resume = re.fullmatch(r"resume task ([0-9]{1,40})", text.strip(), re.I)
+        if resume or text.strip().casefold() == "list recovered tasks":
+            from core.task_manager import TASKS
+
+            if resume:
+                tool = TASKS.claim_recovered_read(resume[1])
+                if tool:
+                    return dispatch(tool, {})
+                return "[UNVERIFIED] This checkpoint cannot be resumed safely."
+            recovered = [row for row in TASKS.recent(100) if row.get("recovered")][:15]
+            return "Recovered tasks:\n" + "\n".join(
+                f"{row['id']} {row['tool']} ({row['status']})" for row in recovered
+            ) if recovered else "No recovered tasks."
         from memory.learning import handle_memory_command, learn_explicit_preference, observe_user_preference
         memory_result = handle_memory_command(text)
         if memory_result is not None:
