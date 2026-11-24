@@ -100,6 +100,7 @@ def init_db() -> None:
             );
             """)
             _ensure_columns(conn)
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_turn_request ON conversation_turns(request_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_turns_conversation_id ON conversation_turns(conversation_id, id)")
             _ensure_default_conversation(conn)
             _ensure_fts(conn)
@@ -156,6 +157,10 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     columns = {row[1] for row in conn.execute("PRAGMA table_info(conversation_turns)")}
     if "channel" not in columns:
         conn.execute("ALTER TABLE conversation_turns ADD COLUMN channel TEXT DEFAULT 'voice'")
+    if "request_id" not in columns:
+        conn.execute("ALTER TABLE conversation_turns ADD COLUMN request_id TEXT")
+    if "pending" not in columns:
+        conn.execute("ALTER TABLE conversation_turns ADD COLUMN pending INTEGER NOT NULL DEFAULT 0")
     if "conversation_id" not in columns:
         conn.execute("ALTER TABLE conversation_turns ADD COLUMN conversation_id INTEGER")
 
@@ -582,7 +587,35 @@ def append_conversation_turn(user, assistant, *, channel="voice", conversation_i
             conn.close()
 
 
-def load_conversation_turns(limit=MAX_CONVERSATION_TURNS, *, channel=None, conversation_id=None):
+def checkpoint_conversation_turn(request_id, user, assistant="", *, channel, conversation_id, complete=False):
+    """Persist a transcript snapshot and replace it atomically with its final turn."""
+    init_db()
+    now = datetime.now().isoformat(timespec="seconds")
+    user = user.strip()
+    if not user:
+        return False
+    if not complete:
+        assistant = "[Interrupted or unfinished] " + assistant.strip()
+    with _lock:
+        conn = _connect()
+        try:
+            with conn:
+                cursor = conn.execute(
+                    "INSERT INTO conversation_turns(timestamp,user,assistant,channel,conversation_id,request_id,pending) "
+                    "SELECT ?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM conversations WHERE id=?) "
+                    "ON CONFLICT(request_id) DO UPDATE SET user=excluded.user, assistant=excluded.assistant, "
+                    "pending=excluded.pending WHERE conversation_turns.pending=1 "
+                    "AND conversation_turns.conversation_id=excluded.conversation_id",
+                    (now, user, assistant, channel, conversation_id, request_id, not complete, conversation_id),
+                )
+                if cursor.rowcount:
+                    conn.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now, conversation_id))
+                return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+
+def load_conversation_turns(limit=MAX_CONVERSATION_TURNS, *, channel=None, conversation_id=None, include_pending=True):
     init_db()
     if conversation_id is None:
         active = get_active_conversation()
@@ -592,7 +625,7 @@ def load_conversation_turns(limit=MAX_CONVERSATION_TURNS, *, channel=None, conve
         try:
             query = "SELECT timestamp,user,assistant FROM conversation_turns"
             params = []
-            clauses = []
+            clauses = [] if include_pending else ["pending=0"]
             if channel is not None:
                 clauses.append("channel=?")
                 params.append(channel)

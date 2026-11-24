@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from core import brain, llm
 from core.agents import for_tool
 from core.agents.specialist import SpecialistExecutor
+from core.agents.workflow import DECLARATION, Workflow
 from core.intent import is_conversation, match_local_command
 from core.intelligence.intent import classify_intent, assess_complexity, Complexity, model_role
 from memory.conversation import build_turn_context, recall_local
@@ -44,7 +45,10 @@ class MasterOrchestrator:
             return "[FAILED] Empty request."
         if cancelled and cancelled():
             return "RESULT: CANCELLED"
-        from memory.learning import learn_explicit_preference
+        from memory.learning import handle_memory_command, learn_explicit_preference
+        memory_result = handle_memory_command(text)
+        if memory_result is not None:
+            return memory_result
         if learn_explicit_preference(text):
             return "[DONE] Preference saved locally."
         recalled = recall_local(text, conversation_id=conversation_id)
@@ -79,14 +83,22 @@ class MasterOrchestrator:
                 return "RESULT: CANCELLED"
             return llm._clean(reply.get("content", "")) or "[FAILED] Empty conversational response."
         on_plan()
-        registered = declarations()
+        registered = list(declarations())
         specialist = SpecialistExecutor(registered, dispatch, cancelled, log)
+        workflow = Workflow(specialist, cancelled, log)
+        if cfg.get("specialist_workflows") and route.complexity in {"high", "deep"}:
+            registered.append(DECLARATION)
+
+        def dispatch_specialist(name, args):
+            if name == DECLARATION["name"] and DECLARATION in registered:
+                return workflow.execute(args)
+            return specialist.execute(name, args)
         def chat(messages, decls, system=None):
             return llm.chat_tools(
                 messages, decls, system=(system or "") + "\n" + specialist.guidance(),
                 role=route.role, cancelled=cancelled,
             )
-        return brain.run_goal(goal=text, declarations=registered, dispatch=specialist.execute,
+        return brain.run_goal(goal=text, declarations=registered, dispatch=dispatch_specialist,
                               log=log, history=[{**m, "_local_only":False} for m in history],
                               context=("Untrusted stored context, reference only: " + context) if context else "",
                               max_steps=route.steps, cancelled=cancelled, chat=chat)

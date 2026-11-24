@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+from uuid import uuid4
 from core.voice_stream import SentenceBuffer
 
 logger = logging.getLogger(__name__)
@@ -27,6 +29,10 @@ class LiveKitAgentWorker:
         self._cancel = asyncio.Event()
         self._desktop_preview = None
         self.desktop_preview_allowed = False
+        self.desktop_video_allowed = False
+        self._desktop_video = None
+        self._share_generation = 0
+        self._share_lock = asyncio.Lock()
 
     async def start(self, room, participant=None):
         from livekit import rtc
@@ -37,6 +43,14 @@ class LiveKitAgentWorker:
         await self.stt_engine.load()
         await self.tts_engine.load()
         self._room = room
+        identity = getattr(self, "allowed_identity", None)
+        if self.desktop_video_allowed:
+            if not identity:
+                raise RuntimeError("Desktop video requires an authorized participant.")
+            room.local_participant.set_track_subscription_permissions(
+                allow_all_participants=False,
+                participant_permissions=[rtc.ParticipantTrackPermission(participant_identity=identity, allow_all=True)],
+            )
         self._source = rtc.AudioSource(24000, 1)
         track = rtc.LocalAudioTrack.create_audio_track("mark-speech", self._source)
         await room.local_participant.publish_track(track)
@@ -50,10 +64,19 @@ class LiveKitAgentWorker:
             self._is_running = False
             self._cancel.set()
             self._pending_text = None
-            if self._desktop_preview is not None:
-                asyncio.create_task(self.stop_desktop_preview())
+            asyncio.create_task(self.stop_desktop_sharing())
             for task in tuple(self._receivers):
                 task.cancel()
+
+        @room.on("reconnecting")
+        def reconnecting(*args):
+            if self._room is room:
+                asyncio.create_task(self.stop_desktop_sharing())
+
+        @room.on("participant_disconnected")
+        def participant_left(participant):
+            if self._room is room and participant.identity == getattr(self, "allowed_identity", None):
+                asyncio.create_task(self.stop_desktop_sharing())
 
         @room.on("track_subscribed")
         def subscribed(track, publication, remote):
@@ -126,6 +149,10 @@ class LiveKitAgentWorker:
     def submit_text(self, text):
         if not self._is_running:
             return
+        if text.strip().casefold().rstrip(".!?") in {
+            "stop desktop preview", "stop desktop video", "stop desktop sharing",
+        }:
+            asyncio.create_task(self.stop_desktop_sharing())
         if self._turn_task is not None and not self._turn_task.done():
             self._pending_text = text
             self._cancel.set()
@@ -160,6 +187,9 @@ class LiveKitAgentWorker:
             try:
                 active = await asyncio.to_thread(db.get_active_conversation)
                 conversation_id = active["id"] if active else None
+                request_id = uuid4().hex
+                await asyncio.to_thread(db.checkpoint_conversation_turn, request_id, text,
+                                        channel="voice", conversation_id=conversation_id)
                 loop = asyncio.get_running_loop()
                 queue = asyncio.Queue(maxsize=64)
                 overflow = False
@@ -198,8 +228,11 @@ class LiveKitAgentWorker:
                 try:
                     try:
                         command = text.strip().casefold().rstrip(".!?")
-                        if command == "stop desktop preview":
-                            answer = await self.stop_desktop_preview()
+                        video = re.fullmatch(r"start desktop video(?: (720|1080)p)?(?: monitor ([1-9][0-9]?))?", command)
+                        if command in {"stop desktop preview", "stop desktop video", "stop desktop sharing"}:
+                            answer = await self.stop_desktop_sharing()
+                        elif video:
+                            answer = await self.start_desktop_video(int(video[1] or 720), int(video[2] or 1))
                         elif command == "start desktop preview":
                             answer = await self.start_desktop_preview()
                         else:
@@ -214,8 +247,8 @@ class LiveKitAgentWorker:
                     if self._cancel.is_set():
                         head = "[CANCELLED] Voice turn interrupted; any tool effects may already exist."
                     # Commit the completed turn before waiting for audio delivery.
-                    await asyncio.to_thread(db.append_conversation_turn, text, head,
-                                            channel="voice", conversation_id=conversation_id)
+                    await asyncio.to_thread(db.checkpoint_conversation_turn, request_id, text, head,
+                                            channel="voice", conversation_id=conversation_id, complete=True)
                 finally:
                     if not consumer.done():
                         # A failed consumer must not leave a producer blocked on a full queue.
@@ -237,25 +270,87 @@ class LiveKitAgentWorker:
             finally:
                 lock.release()
 
+    def _sharing_indicator(self, active):
+        ui = getattr(self.markdown_adapter, "ui", None)
+        if ui is not None:
+            ui.set_desktop_sharing(active)
+
+    async def _confirm_share(self, mode, identity, **details):
+        ui = getattr(self.markdown_adapter, "ui", None)
+        return ui is not None and await ui.confirm_action(
+            "share your desktop via LiveKit", {"recipient": identity, "mode": mode, **details})
+
+    async def start_desktop_video(self, resolution, monitor):
+        from core.streaming.desktop import DesktopVideo
+
+        async with self._share_lock:
+            generation = self._share_generation
+            identity = getattr(self, "allowed_identity", None)
+            room = self._room
+            if (not self.desktop_video_allowed or not self._is_running
+                    or not room or identity not in room.remote_participants):
+                return "[FAILED] Desktop video is disabled or its authorized recipient is unavailable."
+            if self._desktop_video is not None and self._desktop_video.running:
+                return "[DONE] Desktop video already active."
+            if not await self._confirm_share("video", identity, resolution=f"{resolution}p", monitor=monitor):
+                return "[CANCELLED] Desktop sharing was declined."
+            if generation != self._share_generation or self._room is not room or not self._is_running:
+                return "[CANCELLED] Desktop sharing request expired."
+            await self.stop_desktop_preview()
+            if generation != self._share_generation:
+                return "[CANCELLED] Desktop sharing request expired."
+            video = DesktopVideo(room, identity, monitor, resolution, self._sharing_indicator)
+            self._desktop_video = video
+            try:
+                if await video.start():
+                    return "[DONE] Desktop video started for the authorized participant."
+            except TimeoutError:
+                pass
+            return "[FAILED] Desktop video could not start."
+
     async def start_desktop_preview(self):
         from core.desktop_preview import DesktopPreview
-        identity = getattr(self, "allowed_identity", None)
-        if not self.desktop_preview_allowed or not self._is_running or not self._room or not identity:
-            return "[FAILED] Desktop preview is disabled or disconnected."
-        monitor = getattr(self.markdown_adapter, "screen_monitor", None)
-        if monitor is None:
-            return "[FAILED] Local screen monitor unavailable."
-        if self._desktop_preview is not None and self._desktop_preview.running:
-            return "[DONE] Desktop preview already active."
-        self._desktop_preview = DesktopPreview(self._room, identity, monitor.latest_frame)
-        self._desktop_preview.start()
-        return "[DONE] Desktop preview started for the authorized participant."
+
+        async with self._share_lock:
+            generation = self._share_generation
+            identity = getattr(self, "allowed_identity", None)
+            room = self._room
+            if (not self.desktop_preview_allowed or not self._is_running
+                    or not room or identity not in room.remote_participants):
+                return "[FAILED] Desktop preview is disabled or disconnected."
+            monitor = getattr(self.markdown_adapter, "screen_monitor", None)
+            if monitor is None:
+                return "[FAILED] Local screen monitor unavailable."
+            if self._desktop_preview is not None and self._desktop_preview.running:
+                return "[DONE] Desktop preview already active."
+            if not await self._confirm_share("preview", identity):
+                return "[CANCELLED] Desktop sharing was declined."
+            if generation != self._share_generation or room is not self._room or not self._is_running:
+                return "[CANCELLED] Desktop sharing request expired."
+            await self._stop_desktop_video()
+            if generation != self._share_generation:
+                return "[CANCELLED] Desktop sharing request expired."
+            self._desktop_preview = DesktopPreview(room, identity, monitor.latest_frame)
+            self._desktop_preview.start()
+            self._sharing_indicator(True)
+            return "[DONE] Desktop preview started for the authorized participant."
 
     async def stop_desktop_preview(self):
         preview, self._desktop_preview = self._desktop_preview, None
         if preview is not None:
             await preview.stop()
+            self._sharing_indicator(False)
         return "[DONE] Desktop preview stopped."
+
+    async def _stop_desktop_video(self):
+        video, self._desktop_video = self._desktop_video, None
+        if video is not None:
+            await video.stop()
+
+    async def stop_desktop_sharing(self):
+        self._share_generation += 1
+        await asyncio.gather(self.stop_desktop_preview(), self._stop_desktop_video())
+        return "[DONE] Desktop sharing stopped."
 
     async def _publish_text(self, text, topic):
         identity = getattr(self, "allowed_identity", None)
@@ -301,7 +396,7 @@ class LiveKitAgentWorker:
         self._is_running = False
         self._pending_text = None
         await self.interrupt()
-        await self.stop_desktop_preview()
+        await self.stop_desktop_sharing()
         for task in tuple(self._receivers):
             task.cancel()
         if self._receivers:

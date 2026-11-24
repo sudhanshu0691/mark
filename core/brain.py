@@ -128,6 +128,9 @@ def run_goal(goal: str, api_key: str = "", declarations: list[dict] | None = Non
         if not calls:
             text = (msg.get("content") or "").strip()
             report = text or "RESULT: PARTIAL\nNOT DONE: brain ended without a report"
+            if not trace and re.search(r"RESULT:\s*SUCCESS", report, re.I):
+                report = re.sub(r"RESULT:\s*SUCCESS", "RESULT: PARTIAL", report, count=1, flags=re.I)
+                report += "\nNOT VERIFIED: No tool execution was observed."
             return _gate_report(report, goal, deps, used_gui, unverified_steps, contradicted, verdicts, log) + suffix()
 
         for tc in calls:

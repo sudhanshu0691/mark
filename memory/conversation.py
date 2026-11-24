@@ -214,7 +214,7 @@ def recent_messages(channel=None, budget=4800, conversation_id=None) -> list[dic
     """Read a bounded chronological tail as data with explicit speaker roles."""
     from memory import db
     messages = []
-    for turn in reversed(db.load_conversation_turns(12, channel=channel, conversation_id=conversation_id)):
+    for turn in reversed(db.load_conversation_turns(12, channel=channel, conversation_id=conversation_id, include_pending=False)):
         user = turn["user"][:800]
         reply = turn["assistant"][:1000]
         size = len(user) + len(reply)
