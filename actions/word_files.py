@@ -1,4 +1,5 @@
 """Native operations for the existing file processor's DOCX route."""
+
 from pathlib import Path
 
 from actions.office_files import convert_pdf, permitted, save_verified
@@ -20,7 +21,11 @@ def operate(path, action, params):
         return done(f"Converted {path.name} to PDF").to_llm()
 
     template = params.get("template")
-    document = (Document(permitted(template)) if template else Document()) if action == "create" else Document(path)
+    document = (
+        (Document(permitted(template)) if template else Document())
+        if action == "create"
+        else Document(path)
+    )
     changes = 0
 
     def paragraphs(container):
@@ -58,7 +63,9 @@ def operate(path, action, params):
                         if start < offset + length and start + len(needle) > offset:
                             left = max(0, start - offset)
                             right = min(length, start + len(needle) - offset)
-                            replacement = params.get("replacement", "") if offset <= start else ""
+                            replacement = (
+                                params.get("replacement", "") if offset <= start else ""
+                            )
                             run.text = run.text[:left] + replacement + run.text[right:]
                         offset += length
                 changes += len(matches)
@@ -67,6 +74,9 @@ def operate(path, action, params):
     else:
         if params.get("title"):
             document.add_heading(params["title"], 0)
+        if params.get("text"):
+            document.add_paragraph(params["text"])
+            changes += 1
         for block in params.get("blocks", []):
             kind = block.get("type")
             value = block.get("text", "")
@@ -76,14 +86,23 @@ def operate(path, action, params):
                 document.add_paragraph(value, style=block.get("style"))
             elif kind == "table":
                 rows = block.get("rows") or []
-                if not rows or not rows[0] or any(len(row) != len(rows[0]) for row in rows):
+                if (
+                    not rows
+                    or not rows[0]
+                    or any(len(row) != len(rows[0]) for row in rows)
+                ):
                     raise ValueError("Tables require rectangular rows.")
-                table = document.add_table(rows=0, cols=len(rows[0]), style="Table Grid")
+                table = document.add_table(
+                    rows=0, cols=len(rows[0]), style="Table Grid"
+                )
                 for row in rows:
                     for cell, text in zip(table.add_row().cells, row):
                         cell.text = str(text)
             elif kind == "image":
-                document.add_picture(str(permitted(block["path"])), width=Inches(float(block.get("width", 5))))
+                document.add_picture(
+                    str(permitted(block["path"])),
+                    width=Inches(float(block.get("width", 5))),
+                )
             elif kind == "page_break":
                 document.add_page_break()
             else:

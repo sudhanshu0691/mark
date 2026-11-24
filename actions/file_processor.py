@@ -183,6 +183,21 @@ def _process_image(path: Path, action: str, params: dict, speak=None) -> str:
 
     return _process_image(path, "describe", {"instruction": f"{action}: {params}"})
 
+def _local_summary(text, maximum=5):
+    from collections import Counter
+
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?।])\s+|\n{2,}", text) if part.strip()]
+    if len(sentences) <= maximum:
+        return " ".join(sentences)[:1800]
+    terms = [re.findall(r"[^\W_]{4,}", sentence.casefold()) for sentence in sentences[:800]]
+    counts = Counter(word for words in terms for word in set(words))
+    chosen = sorted(range(len(terms)), key=lambda i: (
+        -sum(counts[word] - 1 for word in set(terms[i])) / max(1, len(terms[i])) ** 0.5,
+        i,
+    ))[:maximum]
+    return " ".join(sentences[i] for i in sorted(chosen))[:1800]
+
+
 def _process_pdf(path: Path, action: str, params: dict, speak=None) -> str:
     action = action or "summarize"
 
@@ -204,18 +219,20 @@ def _process_pdf(path: Path, action: str, params: dict, speak=None) -> str:
                 return ""
         return text[:max_chars]
 
-    if action in ("summarize", "extract_text", "translate_hint", "analyze", "reformat"):
+    if action in ("summarize", "summarize_cloud", "extract_text", "translate_hint", "analyze", "reformat"):
         text = _extract_pdf_text()
         if not text.strip():
             return "Could not extract text from PDF (may be scanned/image-based)."
 
+        if action == "summarize":
+            return _local_summary(text)
         if action == "extract_text":
             out = _output_path(path, "text", ".txt")
             out.write_text(text, encoding="utf-8")
             return f"Text extracted ({len(text)} chars). Saved: {out.name}"
 
         prompt_map = {
-            "summarize":      f"Summarize this PDF document concisely:\n\n{text}",
+            "summarize_cloud": f"Summarize this PDF document concisely:\n\n{text}",
             "analyze":        f"Analyze this document thoroughly:\n\n{text}",
             "translate_hint": f"What language is this document in and what does it say? Summarize:\n\n{text}",
             "reformat":       f"Reformat this text cleanly with proper structure:\n\n{text}",

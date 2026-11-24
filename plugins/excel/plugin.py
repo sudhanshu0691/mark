@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from actions.office_files import convert_pdf, permitted, save_verified
+from actions.office_files import convert_pdf, edit_excel_native, libreoffice_path, office_available, permitted, save_verified
 from core.result import done, failed
 
 NAME = "excel"
@@ -35,7 +35,7 @@ DECLARATION = {
         "formula, format, sort, remove_duplicates, summary, chart, recalculate. "
         "Also supports add_sheet, delete_sheet, rename_sheet, copy_sheet, set_range, "
         "insert_rows, delete_rows, insert_columns, delete_columns, merge, unmerge, style, "
-        "dropdown, conditional_format, table, filter, import_csv, export_csv, to_pdf. "
+        "dropdown, conditional_format, table, filter, import_csv, export_csv, to_pdf, pivot, dashboard. "
         "Existing workbooks are backed up before edits."
     ),
     "parameters": {
@@ -213,7 +213,7 @@ def _style_sheet(ws) -> None:
 _EXTRA_EDITS = {"add_sheet", "delete_sheet", "rename_sheet", "copy_sheet", "set_range",
                 "insert_rows", "delete_rows", "insert_columns", "delete_columns",
                 "merge", "unmerge", "style", "dropdown", "conditional_format", "table",
-                "filter", "import_csv"}
+                "filter", "import_csv", "dashboard"}
 
 
 def _check_unlocked(path):
@@ -253,6 +253,35 @@ def _edit(wb, ws, action, args):
             raise ValueError("Invalid row or column index/count.")
         method = action.replace("columns", "cols")
         getattr(ws, method)(index, count)
+        return
+
+    if action == "dashboard":
+        from openpyxl.chart import BarChart, Reference
+
+        group = _column(ws, args.get("group_by"))
+        measure = _column(ws, args.get("column"))
+        name = args.get("title") or "Dashboard"
+        if name in wb.sheetnames:
+            raise ValueError("Choose a new dashboard sheet name.")
+        totals = {}
+        for row in _data_rows(ws):
+            value = row[measure - 1]
+            if isinstance(value, (float, int)) and not isinstance(value, bool):
+                category = str(row[group - 1] or "(blank)")
+                totals[category] = totals.get(category, 0) + value
+        if not totals:
+            raise ValueError("The dashboard measure has no numeric values.")
+        dashboard = wb.create_sheet(name)
+        dashboard.append([ws.cell(1, group).value, "Total"])
+        for key, value in sorted(totals.items(), key=lambda item: item[1], reverse=True):
+            dashboard.append([key, value])
+            dashboard.cell(dashboard.max_row, 1).data_type = "s"
+        chart = BarChart()
+        chart.title = name
+        chart.add_data(Reference(dashboard, min_col=2, min_row=1, max_row=dashboard.max_row), titles_from_data=True)
+        chart.set_categories(Reference(dashboard, min_col=1, min_row=2, max_row=dashboard.max_row))
+        dashboard.add_chart(chart, "D2")
+        _style_sheet(dashboard)
         return
 
     if action == "import_csv":
@@ -465,6 +494,60 @@ def _mutate(args: dict[str, Any]):
         wb.close()
 
 
+def _native_workbook_operation(path, settings):
+    _check_unlocked(path)
+    backup = _backup(path)
+
+    def edit(temporary):
+        shutil.copyfile(path, temporary)
+        edit_excel_native(temporary, settings)
+
+    def verify(temporary):
+        workbook = _workbook(temporary)
+        try:
+            if settings["action"] == "pivot" and not workbook[settings["title"]]._pivots:
+                raise ValueError("Excel did not save a native pivot table.")
+        finally:
+            workbook.close()
+
+    save_verified(path, edit, verify, replace=True)
+    return backup
+
+
+def _pivot(args):
+    path = _path(args.get("path"))
+    permitted(path, write=True)
+    if not office_available("Excel.Application"):
+        return failed("Microsoft Excel is required for native pivot tables", "Use summary for a local grouped table.")
+    from openpyxl.utils.cell import range_boundaries
+
+    cell_range = args.get("range")
+    if not cell_range or any(not value for value in range_boundaries(cell_range)):
+        raise ValueError("Specify a bounded source range including column headings.")
+    workbook = _workbook(path)
+    try:
+        sheet = _sheet(workbook, args.get("sheet"))
+        title = args.get("title") or "Pivot"
+        if title in workbook.sheetnames or not 1 <= len(title) <= 31 or re.search(r"[\[\]*?/\\:]", title):
+            raise ValueError("Choose a valid new worksheet name.")
+        left, top, right, bottom = range_boundaries(cell_range)
+        if top >= bottom or bottom > sheet.max_row or right > sheet.max_column:
+            raise ValueError("The specified source range has no complete data rows.")
+        headers = {sheet.cell(top, col).value for col in range(left, right + 1)}
+        if not {args.get("group_by"), args.get("column")} <= headers:
+            raise ValueError("Pivot fields must match the source headers.")
+        aggregate = args.get("aggregate", "sum")
+        if aggregate not in {"sum", "count", "average", "min", "max"}:
+            raise ValueError("Unsupported pivot aggregation.")
+        settings = {"action": "pivot", "sheet": sheet.title, "range": cell_range,
+                    "title": title, "group_by": args["group_by"], "column": args["column"],
+                    "aggregate": aggregate}
+    finally:
+        workbook.close()
+    backup = _native_workbook_operation(path, settings)
+    return done(f"Created native pivot table in {title}", evidence=f"Backup: {backup.name}")
+
+
 def _recalculate(args: dict[str, Any]):
     import subprocess
     path = _path(args.get("path"))
@@ -473,10 +556,13 @@ def _recalculate(args: dict[str, Any]):
     if not allowed:
         return failed("Workbook path is not approved for writing", reason)
     _check_unlocked(path)
+    if not args.get("engine") and office_available("Excel.Application"):
+        backup = _native_workbook_operation(path, {"action": "recalculate"})
+        return done(f"Recalculated {path.name} in Excel", evidence=f"Backup: {backup.name}")
     engine = str(args.get("engine") or "soffice")
     if engine not in {"soffice", "libreoffice"}:
         return failed("Unsupported spreadsheet recalculation engine", "Choose soffice or libreoffice.")
-    exe = shutil.which(engine)
+    exe = shutil.which(engine) or libreoffice_path()
     if not exe:
         return failed("Spreadsheet recalculation engine is not installed", f"Install LibreOffice or provide engine path; formula values were not changed: {path.name}")
     backup = _backup(path)
@@ -501,6 +587,8 @@ def run(args: dict[str, Any], ctx):
     try:
         if action == "recalculate":
             return _recalculate(args)
+        if action == "pivot":
+            return _pivot(args)
         if action in {"export_csv", "to_pdf"}:
             path = _path(args.get("path"))
             if action == "to_pdf":

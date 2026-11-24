@@ -82,6 +82,10 @@ RISK_MAP["browser_control"].update(dict.fromkeys(
      "get_text", "get_url", "reload", "screenshot"), LOW))
 RISK_MAP["excel"].update(dict.fromkeys(
     ("create", "append", "set_cell", "formula", "format", "sort", "summary", "chart", "recalculate"), MEDIUM))
+RISK_MAP["excel"].update(dict.fromkeys(
+    ("export_csv", "to_pdf", "add_sheet", "copy_sheet", "rename_sheet", "set_range", "merge",
+     "unmerge", "style", "dropdown", "conditional_format", "table", "filter", "import_csv",
+     "insert_rows", "insert_columns", "dashboard", "pivot"), MEDIUM))
 RISK_MAP["excel"]["remove_duplicates"] = HIGH
 RISK_MAP["computer_settings"].update(dict.fromkeys(
     ("empty_recycle_bin", "empty_trash", "log_off", "logout", "sign_out", "hibernate",

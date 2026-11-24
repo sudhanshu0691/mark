@@ -28,11 +28,13 @@ def test_workbook_sheet_range_table_and_dropdown(tmp_path):
     run("dropdown", range="A2:A3", choices=["Desk", "Chair"])
     run("copy_sheet", target_sheet="Archive")
     run("rename_sheet", sheet="Archive", target_sheet="Previous")
+    run("dashboard", group_by="Item", column="Amount")
     run("export_csv", sheet="Data")
     assert (tmp_path / "report.csv").read_text(encoding="utf-8-sig").splitlines()[1] == "Desk,15"
     workbook = load_workbook(path)
     try:
-        assert workbook.sheetnames == ["Data", "Previous"]
+        assert workbook.sheetnames == ["Data", "Previous", "Dashboard"]
+        assert len(workbook["Dashboard"]._charts) == 1
         assert workbook["Data"]["B3"].value == 20
         assert "Inventory" in workbook["Data"].tables
         assert len(workbook["Data"].data_validations.dataValidation) == 1
@@ -100,10 +102,13 @@ def test_presentation_notes_reorder_and_chart(tmp_path):
     run("reorder", index=2, destination_index=1)
     run("add_chart", index=1, categories=["A", "B"], values=[1, 2])
     run("validate")
+    run("duplicate", index=1)
     presentation = Presentation(path)
     assert presentation.slides[0].shapes.title.text == "Second"
     assert presentation.slides[0].notes_slide.notes_text_frame.text == "Detailed notes"
     assert any(shape.has_chart for shape in presentation.slides[0].shapes)
+    assert any(shape.has_chart for shape in presentation.slides[2].shapes)
+    assert presentation.slides[2].notes_slide.notes_text_frame.text == "Detailed notes"
 
 
 def test_document_cloud_requires_outbound_approval(tmp_path, monkeypatch):

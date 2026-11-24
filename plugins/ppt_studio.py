@@ -282,8 +282,29 @@ def _run(args):
         before = len(prs.slides)
         src = prs.slides[idx - 1]
         dst = prs.slides.add_slide(src.slide_layout)
-        if dst.shapes.title is not None and src.shapes.title is not None:
-            dst.shapes.title.text = f"{src.shapes.title.text} (copy)"
+        from copy import deepcopy
+
+        relations = {}
+        for old_id, relationship in src.part.rels.items():
+            if relationship.reltype.endswith(("/slideLayout", "/notesSlide")):
+                continue
+            target = relationship.target_ref if relationship.is_external else relationship.target_part
+            relations[old_id] = dst.part.relate_to(
+                target, relationship.reltype, is_external=relationship.is_external,
+            )
+        for shape in list(dst.shapes):
+            dst.shapes._spTree.remove(shape.element)
+        for shape in src.shapes:
+            element = deepcopy(shape.element)
+            for node in element.iter():
+                for attribute, value in tuple(node.attrib.items()):
+                    if attribute.startswith("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}") and value in relations:
+                        node.set(attribute, relations[value])
+            dst.shapes._spTree.insert_element_before(element, "p:extLst")
+        if src.has_notes_slide:
+            original = src.notes_slide.notes_text_frame
+            if original is not None:
+                dst.notes_slide.notes_text_frame.text = original.text
         err = _save(prs, path)
         if err:
             return failed("Copy not saved", err)
