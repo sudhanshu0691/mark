@@ -15,7 +15,6 @@ Public hooks used by main.py / plugins are unchanged and safe to call from any t
 from __future__ import annotations
 
 import html
-import itertools
 import json
 import math
 import sys
@@ -648,7 +647,7 @@ class MarkUI(QMainWindow):
         self._file: str | None = None
         self._camera_monitor = None
         self._closing = False
-        self._tid = itertools.count(1)
+        self.on_desktop_share_stop = None
         self._task_items: dict[int, Any] = {}
         self._state = "SLEEPING"
         self.on_screen_monitor_toggle = None
@@ -718,6 +717,9 @@ class MarkUI(QMainWindow):
             return await asyncio.wait_for(result, timeout=120)
         except asyncio.TimeoutError:
             return False
+
+    def set_desktop_sharing(self, active: bool) -> None:
+        self._post(lambda: self.desktop_share_stop.setVisible(active))
 
     def set_gemini_live_state(self, state: str) -> None:
         """Update the UI's Live indicator from actual session lifecycle events."""
@@ -797,6 +799,13 @@ class MarkUI(QMainWindow):
         stop.setObjectName("danger")
         stop.setStyleSheet("QPushButton{color:#FCA5A5;border-color:#7F1D1D;}")
         header.addWidget(stop)
+        self.desktop_share_stop = QPushButton("Stop sharing")
+        self.desktop_share_stop.setObjectName("danger")
+        self.desktop_share_stop.setToolTip("Your desktop is being shared via LiveKit")
+        self.desktop_share_stop.clicked.connect(
+            lambda: self.on_desktop_share_stop and self.on_desktop_share_stop())
+        self.desktop_share_stop.hide()
+        header.addWidget(self.desktop_share_stop)
         self.menu_button = self._icon_button("⋮", "Menu", self._open_menu)
         header.addWidget(self.menu_button)
         root.addLayout(header)
@@ -1198,7 +1207,8 @@ class MarkUI(QMainWindow):
             self.tasks.appendPlainText(text)
 
     def task_start(self, name: str, args: dict | None = None) -> int:
-        tid = next(self._tid)
+        from uuid import uuid4
+        tid = uuid4().int
         short = ", ".join(f"{k}={str(v)[:36]}" for k, v in (args or {}).items() if k not in {"code", "content", "data"})[:130]
         self._post(lambda: self._task_start_ui(tid, name, short))
         return tid

@@ -409,12 +409,28 @@ def _unzip(src: Path, dst: Path | None) -> ActionResult:
     try:
         with zipfile.ZipFile(src) as z:
             base = dst.resolve()
-            for m in z.namelist():
-                if not str((base / m).resolve()).startswith(str(base)):
-                    return failed("Unzip stopped", f"unsafe path inside archive: {m}")
+            from pathlib import PurePosixPath, PureWindowsPath
+
+            entries = z.infolist()
+            for entry in entries:
+                member = entry.filename
+                windows = PureWindowsPath(member)
+                relative = PurePosixPath(member)
+                if "\\" in member or windows.drive or windows.root or relative.is_absolute() or ".." in relative.parts:
+                    return failed("Unzip stopped", f"unsafe path inside archive: {member}")
+                if any(any(c in '<>:"|?*' or ord(c) < 32 for c in part)
+                       or part.rstrip(" .") != part or PureWindowsPath(part).is_reserved()
+                       for part in relative.parts):
+                    return failed("Unzip stopped", f"unsafe filename inside archive: {member}")
+                target = base.joinpath(*relative.parts).resolve()
+                if not target.is_relative_to(base):
+                    return failed("Unzip stopped", f"archive path leaves the destination: {member}")
+                blocked = _guard(target, True)
+                if blocked:
+                    return blocked
             z.extractall(dst)
-            n = len(z.namelist())
-    except (OSError, zipfile.BadZipFile) as e:
+            n = len(entries)
+    except (OSError, ValueError, RuntimeError, zipfile.BadZipFile) as e:
         return failed(f"Cannot unzip {src}", str(e))
     return done(f"Extracted {n} entries to {dst}", evidence="extraction completed without error")
 

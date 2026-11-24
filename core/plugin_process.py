@@ -4,6 +4,7 @@ A process boundary permits termination of the worker, not an OS security
 sandbox. Plugins still execute as the current user. No UI/tool bridge is passed.
 """
 from __future__ import annotations
+import base64
 import contextlib
 import importlib.util
 import inspect
@@ -34,7 +35,7 @@ def _terminate(process):
         process.kill()
     process.wait(timeout=3)
 
-def run_isolated(path, name, args, timeout, cancelled):
+def run_isolated(path, name, args, timeout, cancelled, *, source=None):
     if cancelled.is_set():
         return "[CANCELLED] Plugin execution cancelled before launch."
     root = Path(__file__).resolve().parent.parent
@@ -46,6 +47,7 @@ def run_isolated(path, name, args, timeout, cancelled):
     try:
         payload = json.dumps({
             "path": str(Path(path).resolve()), "name": name, "args": args,
+            "source": base64.b64encode(source).decode("ascii") if source is not None else None,
         })
     except (TypeError, ValueError, RecursionError):
         return "[FAILED] Plugin request is not serializable."
@@ -73,7 +75,9 @@ def run_isolated(path, name, args, timeout, cancelled):
                 return "[FAILED] Plugin result exceeds size limit."
             try:
                 data = json.loads(response.read_text(encoding="utf-8"))
-                return str(data["result"])
+                if not isinstance(data, dict) or not isinstance(data.get("result"), str):
+                    raise ValueError("Invalid response object")
+                return data["result"]
             except (ValueError, KeyError, TypeError, OSError):
                 return "[FAILED] Invalid plugin worker response."
         finally:
@@ -88,7 +92,11 @@ def _worker(request, response):
     if spec is None or spec.loader is None:
         raise ImportError("Invalid plugin")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    source = data.get("source")
+    if source is None:
+        spec.loader.exec_module(module)
+    else:
+        exec(compile(base64.b64decode(source, validate=True), data["path"], "exec"), module.__dict__)
     if getattr(module, "METADATA", {}).get("execution") != "process":
         raise ValueError("Plugin has not opted into isolated execution")
     tools = list(getattr(module, "TOOLS", []))

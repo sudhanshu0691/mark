@@ -1,4 +1,7 @@
 """Request-scoped specialist execution over the trusted dispatcher."""
+import json
+
+from core import risk
 from core.agents import for_tool
 from core.risk import validate_arguments
 
@@ -9,6 +12,7 @@ class SpecialistExecutor:
         self.cancelled = cancelled
         self.log = log
         self.completed = []
+        self.attempted_writes = set()
         self.previous_specialist = None
 
     def execute(self, name, args):
@@ -20,6 +24,11 @@ class SpecialistExecutor:
         error = validate_arguments(declaration, args)
         if error:
             return "[FAILED] " + error
+        if risk.classify(name, args) != risk.READ_ONLY:
+            signature = name, json.dumps(args, sort_keys=True, default=str)
+            if signature in self.attempted_writes:
+                return "[UNVERIFIED] This action was already attempted in the current request."
+            self.attempted_writes.add(signature)
         profile = for_tool(name)
         if self.previous_specialist and self.previous_specialist != profile.name:
             self.log(f"[handoff] {self.previous_specialist} -> {profile.name}")

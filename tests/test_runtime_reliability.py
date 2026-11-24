@@ -214,3 +214,41 @@ def test_recall_uses_previous_turn_without_planner(history, monkeypatch):
     live._run_local_command("What colour did I tell you earlier?")
     assert any("my test colour" in m["content"] for m in inference.call_args.args[0])
     assert recent_messages()[-1]["content"] == "blue"
+
+
+def test_model_requested_memory_requires_local_approval(history):
+    live = MarkLive(Mock(muted=True))
+    live.ui.task_start.return_value = None
+    live.ui.confirm_action = AsyncMock(side_effect=[False, True])
+    request = SimpleNamespace(name="save_memory", id="memory",
+                              args={"category": "notes", "key": "color", "value": "blue"})
+
+    async def run():
+        refused = await live._execute_tool(request)
+        assert refused.response["result"].startswith("[CANCELLED]")
+        assert "color" not in history.load_memory_dict()["notes"]
+
+        approved = await live._execute_tool(request)
+        assert approved.response["result"].startswith("[DONE]")
+        assert history.load_memory_dict()["notes"]["color"]["source"] == "user_confirmed"
+
+    asyncio.run(run())
+
+
+def test_archives_reject_aliased_or_escaping_names_before_writing(monkeypatch, tmp_path):
+    import zipfile
+
+    from actions import fs_full
+
+    monkeypatch.setattr(fs_full, "_guard", lambda *args: None)
+    archive = tmp_path / "example.zip"
+    destination = tmp_path / "output"
+    with zipfile.ZipFile(archive, "w") as zip_file:
+        zip_file.writestr("safe.txt", "safe")
+        zip_file.writestr("nested/../../output-sibling/escape.txt", "outside")
+    assert fs_full._unzip(archive, destination).to_llm().startswith("[FAILED]")
+    assert not destination.exists()
+    with zipfile.ZipFile(archive, "w") as zip_file:
+        zip_file.writestr("nested/safe.txt", "safe")
+    assert fs_full._unzip(archive, destination).to_llm().startswith("[DONE]")
+    assert (destination / "nested" / "safe.txt").read_text() == "safe"

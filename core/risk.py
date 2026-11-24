@@ -49,6 +49,9 @@ RISK_MAP.update({
     "file_controller": {**RISK_MAP["file_controller"], **dict.fromkeys(("move", "write", "rename", "unzip", "copy", "zip", "open"), DESTRUCTIVE)},
     "window_manager": {"close": DESTRUCTIVE, "*": WRITE},
     "shutdown_mark": {"*": DESTRUCTIVE},
+    "screen_process": {"*": EXTERNAL},
+    "save_memory": {"*": EXTERNAL},
+    "screen_read": {"ask": EXTERNAL},
 })
 
 # Explicit interaction categories override the conservative defaults above.

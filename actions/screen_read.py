@@ -65,7 +65,9 @@ def _jpeg(img, max_w: int = 1600, q: int = 85) -> bytes:
 def vision_answer(img_bytes: bytes, question: str, mime: str = "image/jpeg", extra: str = "") -> str:
     """Synchronous Gemini vision call; returns plain text or raises."""
     from core import llm as genai  # configured LLM client (drop-in)
+    from core.cloud_privacy import require_vision
     from core.llm import types as gt
+    require_vision(genai.load_config())
     client = genai.Client()
     q = question.strip() or "What is on the screen? Which window is in front?"
     if extra:
@@ -165,8 +167,11 @@ def screen_read(args: dict, player=None) -> ActionResult | str:
     if mode == "ask":
         q = str(args.get("question") or args.get("text") or "")
         try:
+            from core import llm
+            from core.cloud_privacy import require_vision
+            require_vision(llm.load_config())
             img = grab_full(int(args.get("monitor", 1)), args.get("region"))
-            ans = vision_answer(_jpeg(img), q, extra=_facts())
+            ans = vision_answer(_jpeg(img), q)
         except Exception as e:
             return failed("Could not look at the screen", f"{type(e).__name__}: {e}")
         if not ans:

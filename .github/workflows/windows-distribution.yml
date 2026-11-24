@@ -3,16 +3,23 @@ on:
   workflow_dispatch:
   push:
     tags: ['v*']
-    branches: [main]
+    branches: [main, 'codex/**']
     paths:
-      - 'packaging/windows_launcher.py'
+      - 'packaging/**'
+      - 'setup_windows.bat'
+      - 'run_mark.bat'
+      - 'pyproject.toml'
+      - 'uv.lock'
       - '.github/workflows/windows-distribution.yml'
 permissions:
   contents: read
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
+    env:
+      QT_QPA_PLATFORM: offscreen
+      MARK_PROFILE: offline
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -20,7 +27,7 @@ jobs:
           python-version: '3.11'
       - name: Build executable launcher
         run: |
-          python -m pip install pyinstaller==6.16.0
+          python -m pip install pyinstaller==6.16.0 uv
           python -m PyInstaller --noconfirm --clean --onefile --windowed --name MARK packaging/windows_launcher.py
       - name: Assemble source distribution
         shell: pwsh
@@ -28,10 +35,21 @@ jobs:
           git archive --format=zip --output=source.zip HEAD
           Expand-Archive source.zip -DestinationPath release/MARK
           Copy-Item dist/MARK.exe release/MARK/MARK.exe
-          if (!(Test-Path release/MARK/uv.lock)) { throw "Missing dependency lock" }
-          if (!(Test-Path release/MARK/main.py)) { throw "Missing runtime" }
+          foreach ($file in @("uv.lock", "main.py", "run_mark.bat", "setup_windows.bat", "config/bundled_plugins.json")) {
+            if (!(Test-Path "release/MARK/$file")) { throw "Missing archived file $file" }
+          }
           Compress-Archive -Path release/MARK -DestinationPath MARK-windows.zip
           Get-FileHash MARK-windows.zip -Algorithm SHA256 | Format-List | Out-File MARK-windows.sha256.txt
+      - name: Install and check the packaged runtime
+        shell: pwsh
+        run: |
+          Expand-Archive MARK-windows.zip -DestinationPath smoke
+          Push-Location smoke/MARK
+          cmd.exe /d /c setup_windows.bat --non-interactive
+          if ($LASTEXITCODE -ne 0) { throw "Packaged setup failed" }
+          $launcher = Start-Process .\MARK.exe -ArgumentList '--check' -Wait -PassThru
+          if ($launcher.ExitCode -ne 0) { throw "Launcher check failed with $($launcher.ExitCode)" }
+          Pop-Location
       - uses: actions/upload-artifact@v4
         with:
           name: MARK-windows

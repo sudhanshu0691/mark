@@ -338,17 +338,12 @@ class GeminiProvider(InferenceProvider):
         return gemini_health()
     
     async def generate(self, messages: list[dict], **kwargs: Any) -> dict:
-        role = kwargs.get("role", "text")
-        result = await asyncio.to_thread(
-            _gemini_chat,
-            messages,
-            role,
-            kwargs.get("tools"),
-            kwargs.get("temperature"),
-            kwargs.get("max_tokens"),
-            kwargs.get("json_mode", False),
+        return await asyncio.to_thread(
+            chat_raw, messages, role=kwargs.get("role", "text"), tools=kwargs.get("tools"),
+            temperature=kwargs.get("temperature"), max_tokens=kwargs.get("max_tokens"),
+            json_mode=kwargs.get("json_mode", False), on_delta=kwargs.get("on_delta"),
+            cancelled=kwargs.get("cancelled"), provider_override="gemini",
         )
-        return result
 
 
 # --------------------------------------------------------------------------- web grounding
@@ -389,10 +384,32 @@ def chat_raw(messages: list[dict], role: str = "text", tools: list[dict] | None 
                           if cloud_messages[i].get("role") == "user"), -1)
         if last_user >= 0:
             cloud_messages = [m for m in cloud_messages[:last_user] if m.get("role") == "system"] + cloud_messages[last_user:]
-    from core.cloud_privacy import redact_messages
-    cloud_messages = redact_messages(cloud_messages, cfg)
-    if role == "vision" and not cfg.get("allow_cloud_vision", False):
-        raise LLMUnavailable("Cloud vision is not authorized.")
+    from core.cloud_privacy import CloudPolicyError, prepare_messages, require_vision
+    try:
+        if role == "vision":
+            require_vision(cfg, private=False)
+        cloud_messages = prepare_messages(cloud_messages, cfg, role)
+    except CloudPolicyError as exc:
+        raise LLMUnavailable(str(exc)) from exc
+    response_budget = int(cfg.get("max_response_tokens", 0))
+    if response_budget > 0:
+        max_tokens = min(max_tokens or response_budget, response_budget)
+    byte_budget = int(cfg.get("max_text_context_bytes", 0))
+    if byte_budget > 0:
+        def wire_size():
+            text_fields = [{k: v for k, v in msg.items() if k != "images"} for msg in cloud_messages]
+            return len(json.dumps([text_fields, tools], ensure_ascii=False, default=str).encode("utf-8"))
+
+        last_user = max((i for i, m in enumerate(cloud_messages) if m.get("role") == "user"), default=-1)
+        while wire_size() > byte_budget:
+            oldest = next((i for i, m in enumerate(cloud_messages[:last_user])
+                           if m.get("role") == "user"), None)
+            if oldest is None:
+                raise LLMUnavailable("Request exceeds the configured text context budget.")
+            end = next(i for i in range(oldest + 1, last_user + 1)
+                       if cloud_messages[i].get("role") == "user")
+            del cloud_messages[oldest:end]
+            last_user -= end - oldest
     if provider_override is not None and provider_override not in {"groq", "gemini"}:
         raise LLMUnavailable("Unsupported cloud provider.")
     if role == "vision" and provider_override not in (None, "gemini"):
@@ -426,6 +443,9 @@ def chat_raw(messages: list[dict], role: str = "text", tools: list[dict] | None 
                 name = cfg.get("gemini", {}).get("vision_model" if role == "vision" else "text_model")
                 if cfg.get("free_tier_only", True) and name not in cfg.get("verified_free_models", []):
                     raise LLMUnavailable("Gemini model is not on the configured allowlist.")
+                if on_delta is not None and not tools and not json_mode:
+                    return _run_provider("gemini", _gemini_chat, cloud_messages, role, tools,
+                                         temperature, max_tokens, json_mode, emit, cancelled)
                 return _run_provider("gemini", _gemini_chat, cloud_messages, role, tools, temperature, max_tokens, json_mode)
             if on_delta is not None and not tools and not json_mode:
                 return _run_provider("groq", _groq_chat, cloud_messages, role, tools, temperature, max_tokens, json_mode, emit, cancelled)
@@ -438,12 +458,49 @@ def chat_raw(messages: list[dict], role: str = "text", tools: list[dict] | None 
 
 
 def _groq_chat(messages, role, tools, temperature, max_tokens, json_mode, on_delta=None, cancelled=None):
+    cfg = load_config()
+    retries = max(0, min(int(cfg.get("groq_max_retries", 0)), 3))
+    emitted = False
+
+    def emit(delta):
+        nonlocal emitted
+        emitted = True
+        on_delta(delta)
+
+    for attempt in range(retries + 1):
+        if cancelled and cancelled():
+            raise LLMUnavailable("Inference cancelled.")
+        try:
+            return _groq_request(messages, role, tools, temperature, max_tokens, json_mode,
+                                 emit if on_delta is not None else None, cancelled)
+        except LLMUnavailable as exc:
+            status = getattr(exc.__cause__, "status_code", None)
+            transient = status in {408, 500, 502, 503, 504} or type(exc.__cause__).__name__ in {
+                "APIConnectionError", "APITimeoutError", "TimeoutError",
+            }
+            if emitted or not transient or attempt == retries:
+                raise
+            _backoff(min(4, 0.5 * 2**attempt) + random.uniform(0, 0.25), cancelled)
+
+
+def _backoff(delay, cancelled):
+    if cancelled is None:
+        time.sleep(delay)
+        return
+    end = time.monotonic() + delay
+    while time.monotonic() < end:
+        if cancelled():
+            raise LLMUnavailable("Inference cancelled.")
+        time.sleep(min(0.1, max(0, end - time.monotonic())))
+
+
+def _groq_request(messages, role, tools, temperature, max_tokens, json_mode, on_delta, cancelled):
     from core.secrets import get_secret
     cfg = load_config()
     models = cfg.get("providers", {}).get("groq", {})
     name = models.get(f"{role}_model", models.get("text_model", "qwen/qwen3.8-27b"))
     if cfg.get("free_tier_only", True) and name not in cfg.get("verified_free_models", []):
-        raise LLMUnavailable("Groq model free-tier eligibility is not verified.")
+        raise LLMUnavailable("Groq model is not on the configured allowlist.")
     key = get_secret("groq")
     if not key:
         raise LLMUnavailable("Groq API key is not configured.")
@@ -506,7 +563,11 @@ def _groq_chat(messages, role, tools, temperature, max_tokens, json_mode, on_del
                 providers.record("groq", name, start, tokens=tokens, first_ms=first_ms)
                 return {"role": "assistant", "content": content}
             response = client.chat.completions.create(**payload)
+        if not getattr(response, "choices", None):
+            raise LLMUnavailable("Groq returned no choices.")
         message = response.choices[0].message
+        if not (message.content or message.tool_calls):
+            raise LLMUnavailable("Groq returned an empty response.")
         providers.record("groq", name, start, tokens=getattr(response.usage, "total_tokens", 0))
         result = {"role": "assistant", "content": _clean(message.content or "")}
         if message.tool_calls:
@@ -516,7 +577,12 @@ def _groq_chat(messages, role, tools, temperature, max_tokens, json_mode, on_del
         raise
     except Exception as exc:
         status = getattr(exc, "status_code", 0) or 0
-        providers.record("groq", name, start, status=status)
+        response = getattr(exc, "response", None)
+        try:
+            retry_after = float(response.headers["retry-after"])
+        except (AttributeError, KeyError, TypeError, ValueError):
+            retry_after = None
+        providers.record("groq", name, start, status=status, retry_after=retry_after)
         raise LLMUnavailable(f"Groq request failed ({'HTTP ' + str(status) if status else type(exc).__name__}).") from exc
 
 
@@ -656,7 +722,7 @@ def health() -> dict:
 
 
 # --------------------------------------------------------------------------- optional Gemini backend
-def _gemini_chat(messages, role, tools, temperature, max_tokens, json_mode):
+def _gemini_chat(messages, role, tools, temperature, max_tokens, json_mode, on_delta=None, cancelled=None):
     """Preserve tool turns in Google's native content representation."""
     from google.genai import types as gt
     contents, instructions = [], []
@@ -683,13 +749,24 @@ def _gemini_chat(messages, role, tools, temperature, max_tokens, json_mode):
         config["tools"] = [{"function_declarations": [t["function"] for t in tools]}]
     if json_mode:
         config["response_mime_type"] = "application/json"
-    reply = _gemini_generate(role, contents, config, native=True)
-    text = "".join(part.text for cand in reply.candidates or [] for part in (cand.content.parts or []) if part.text and not part.thought)
-    return {"role": "assistant", "content": text, "_gemini_content": reply.candidates[0].content, "tool_calls": [
+    streaming = on_delta is not None and not tools and not json_mode
+    reply = _gemini_generate(role, contents, config, native=True,
+                             on_delta=on_delta if streaming else None, cancelled=cancelled)
+    if streaming:
+        return {"role": "assistant", "content": _clean(reply.text or "")}
+    candidates = [candidate.content for candidate in (getattr(reply, "candidates", None) or [])
+                  if candidate.content is not None]
+    if not candidates:
+        text = (getattr(reply, "text", None) or "").strip()
+        if text:
+            return {"role": "assistant", "content": text}
+        raise LLMUnavailable("Gemini returned no candidate content.")
+    text = "".join(part.text for part in candidates[0].parts or [] if part.text and not part.thought)
+    return {"role": "assistant", "content": text, "_gemini_content": candidates[0], "tool_calls": [
         {"function": {"name": fc.name, "arguments": dict(fc.args or {})}} for fc in (reply.function_calls or [])]}
 
 
-def _gemini_generate(role: str, contents: Any, config: Any, *, native=False):
+def _gemini_generate(role: str, contents: Any, config: Any, *, native=False, on_delta=None, cancelled=None):
     """Used only when config backend == 'gemini'. Same quota rules as before."""
     from google import genai
     from google.genai import types as gt
@@ -702,17 +779,18 @@ def _gemini_generate(role: str, contents: Any, config: Any, *, native=False):
     key = key or os.environ.get("GEMINI_API_KEY", "")
     if not key:
         raise LLMUnavailable("backend is 'gemini' but no gemini_api_key is set.")
+    from core.cloud_privacy import prepare_text
+    cfg = load_config()
     if native:
         parts = contents
     else:
         text, images = _normalise(contents)
-        parts = [gt.Part.from_bytes(data=b, mime_type="image/png") for b in images] + [text]
+        parts = [gt.Part.from_bytes(data=b, mime_type="image/png") for b in images] + [prepare_text(text, cfg)]
     kw: dict[str, Any] = {}
     for k in ("system_instruction", "temperature", "tools", "max_output_tokens", "response_mime_type"):
         v = _cfg_get(config, k)
         if v is not None:
-            kw[k] = v
-    cfg = load_config()
+            kw[k] = prepare_text(v, cfg) if k == "system_instruction" and isinstance(v, str) else v
     name = cfg.get("gemini", {}).get("vision_model" if role == "vision" else "text_model", "")
     if not name:
         raise LLMUnavailable("Gemini text model is not configured.")
@@ -725,19 +803,35 @@ def _gemini_generate(role: str, contents: Any, config: Any, *, native=False):
     timeout_ms = int(max(1, float(cfg.get("gemini", {}).get("timeout_s", 60))) * 1000)
     client = providers.client_for("gemini", key) or genai.Client(api_key=key, http_options={"timeout": timeout_ms})
     for attempt in range(retries + 1):
+        if cancelled and cancelled():
+            raise LLMUnavailable("Inference cancelled.")
+        emitted = False
         try:
             start = time.monotonic()
             with providers.cloud_request("gemini", cfg):
-                if cfg.get("stream_text") and not native and not kw.get("tools"):
+                if on_delta is not None or (cfg.get("stream_text") and not native and not kw.get("tools")):
                     chunks = []
                     tokens = 0
                     first_ms = None
-                    for event in client.models.generate_content_stream(model=name, contents=parts, config=gt.GenerateContentConfig(**kw)):
-                        if event.text:
-                            if first_ms is None:
-                                first_ms = round((time.monotonic()-start)*1000)
-                            chunks.append(event.text)
-                        tokens = getattr(event.usage_metadata, "total_token_count", 0) or tokens
+                    events = client.models.generate_content_stream(
+                        model=name, contents=parts, config=gt.GenerateContentConfig(**kw))
+                    try:
+                        for event in events:
+                            if cancelled and cancelled():
+                                raise LLMUnavailable("Inference cancelled.")
+                            if event.text:
+                                if first_ms is None:
+                                    first_ms = round((time.monotonic() - start) * 1000)
+                                chunks.append(event.text)
+                                if on_delta is not None:
+                                    emitted = True
+                                    on_delta(event.text)
+                            usage = getattr(event, "usage_metadata", None)
+                            tokens = getattr(usage, "total_token_count", 0) or tokens
+                    finally:
+                        close = getattr(events, "close", None)
+                        if close is not None:
+                            close()
                     if not chunks:
                         raise LLMUnavailable("Gemini returned an empty text stream.")
                     providers.record("gemini", name, start, tokens=tokens, first_ms=first_ms)
@@ -760,13 +854,13 @@ def _gemini_generate(role: str, contents: Any, config: Any, *, native=False):
                           404: f"model '{name}' not found (HTTP 404)"}
                 raise LLMUnavailable("Gemini " + labels[status]) from exc
             recoverable = status in (429, 500, 502, 503, 504) or "timeout" in message or "temporar" in message
-            if not recoverable or attempt >= retries:
+            if emitted or not recoverable or attempt >= retries:
                 category = f"HTTP {status}" if status else type(exc).__name__
                 raise LLMUnavailable(f"Gemini request failed ({category}); credentials and request details were omitted.") from exc
             base = float(backoffs[min(attempt, len(backoffs)-1)]) if backoffs else 2 ** attempt
             delay = max(0, base) + random.uniform(0, min(1.0, max(0.1, base * 0.2)))
             print(f"[Gemini] HTTP {status or 'timeout'}; retrying in {delay:.1f}s.")
-            time.sleep(delay)
+            _backoff(delay, cancelled)
 
 
 _health_cache: dict[str, Any] = {"at": 0.0, "value": None}
