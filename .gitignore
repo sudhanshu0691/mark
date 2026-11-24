@@ -21,6 +21,7 @@ config/contacts.json
 config/phone.json
 config/permissions.json
 config/trusted_plugins.json
+config/sandbox_plugins.json
 config/.env
 config/runtime.env
 config/livekit.ini

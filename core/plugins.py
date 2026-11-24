@@ -29,6 +29,7 @@ import importlib.util
 import inspect
 import json
 import re
+import sys
 import threading
 import time
 import traceback
@@ -78,6 +79,31 @@ def _verified_source(path, fingerprints):
     return source
 
 
+def _sandbox_manifest():
+    try:
+        with (_TRUST_DIR / "sandbox_plugins.json").open(encoding="utf-8") as stream:
+            manifest = json.loads(stream.read(262_145))
+        return manifest if isinstance(manifest, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _sandbox_source(path, entry):
+    relative = path.relative_to(PLUGIN_DIR).as_posix()
+    if path.resolve() != PLUGIN_DIR.resolve() / relative or not isinstance(entry, dict):
+        raise ValueError("Unsafe sandbox plugin path or manifest.")
+    if set(entry) - {"sha256", "tool", "timeout"}:
+        raise ValueError("Sandbox plugins support isolated computation only.")
+    with path.open("rb") as stream:
+        source = stream.read(1024 * 1024 + 1)
+    if len(source) > 1024 * 1024:
+        raise ValueError("Sandbox plugin source exceeds its size budget.")
+    digest = hashlib.sha256(source.replace(b"\r\n", b"\n")).hexdigest()
+    if entry.get("sha256") != digest:
+        raise ValueError("Sandbox plugin approval is missing or its source changed.")
+    return source
+
+
 class PluginContext:
     """Handed to every plugin so it can talk to Mark."""
 
@@ -123,7 +149,8 @@ class _Loaded:
         self.capabilities = list(self.metadata.get("capabilities", []))
         self.timeout = max(0.1, min(float(self.metadata.get("timeout", 30)), 300))
         self.health = "unknown"
-        self.isolated = self.metadata.get("execution") == "process"
+        self.sandboxed = self.metadata.get("execution") == "appcontainer"
+        self.isolated = self.metadata.get("execution") in {"process", "appcontainer"}
 
 
 class PluginManager:
@@ -133,6 +160,7 @@ class PluginManager:
         self.errors: dict[str, str] = {}         # file -> error text
         self._mtimes: dict[str, int] = {}
         self._trust = {}
+        self._sandbox = {}
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._inflight: dict[str, tuple[Future, PluginContext]] = {}
@@ -229,6 +257,23 @@ class PluginManager:
             print(f"[plugin] ❌ {path.name}: {e}")
             traceback.print_exc()
 
+    def _load_sandbox(self, path, entry):
+        if sys.platform != "win32":
+            raise ValueError("Windows AppContainer sandbox is unavailable on this platform.")
+        source = _sandbox_source(path, entry)
+        tool = entry.get("tool")
+        if not isinstance(tool, dict) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,62}", str(tool.get("name", ""))):
+            raise ValueError("A single valid sandbox tool declaration is required.")
+        self._validate_declaration(tool, path)
+        name = "sandbox." + path.relative_to(PLUGIN_DIR).as_posix()
+        module = ModuleType(name)
+        module.METADATA = {"execution": "appcontainer", "capabilities": ["isolated_computation"],
+                           "timeout": max(1, min(float(entry.get("timeout", 20)), 60))}
+        loaded = _Loaded(name, path, module, {tool["name"]: {"declaration": tool, "run": None}})
+        loaded.source_digest = hashlib.sha256(source).digest()
+        loaded.health = "sandbox_required"
+        self.loaded[name] = loaded
+
     def load_all(self, builtin_names: set[str] | None = None) -> None:
         with self._lock:
             if self._inflight:
@@ -240,9 +285,14 @@ class PluginManager:
             self.errors.clear()
             self._mtimes.clear()
             self._trust = _trusted_plugins()
+            self._sandbox = _sandbox_manifest()
             for f in self._files():
                 self._mtimes[str(f)] = self._stamp(f)
                 try:
+                    relative = f.relative_to(PLUGIN_DIR).as_posix()
+                    if relative not in self._trust and relative in self._sandbox:
+                        self._load_sandbox(f, self._sandbox[relative])
+                        continue
                     source = _verified_source(f, self._trust)
                 except (OSError, ValueError) as exc:
                     self.errors[str(f)] = str(exc)
@@ -301,7 +351,7 @@ class PluginManager:
         with self._lock:
             owner = next((l for l in self.loaded.values() if name in l.tools), None)
             fn = owner.tools[name]["run"] if owner else None
-        if fn is None or owner is None:
+        if owner is None or (fn is None and not owner.sandboxed):
             return f"[FAILED] plugin tool '{name}' not found"
         from core.plugin_safety import check_call, verify_result
         if not isinstance(args, dict):
@@ -328,13 +378,26 @@ class PluginManager:
             source = None
             if str(owner.path) in self._mtimes:
                 try:
-                    source = _verified_source(owner.path, _trusted_plugins())
+                    if owner.sandboxed:
+                        relative = owner.path.relative_to(PLUGIN_DIR).as_posix()
+                        entry = _sandbox_manifest().get(relative)
+                        if entry != self._sandbox.get(relative):
+                            raise ValueError("Sandbox approval changed.")
+                        source = _sandbox_source(owner.path, entry)
+                    else:
+                        source = _verified_source(owner.path, _trusted_plugins())
                     if hashlib.sha256(source).digest() != owner.source_digest:
                         return "[FAILED] Plugin changed; reload before running it."
                 except (OSError, ValueError):
                     return "[FAILED] Plugin approval is missing or its source changed."
             context = self._context_for(owner)
             def invoke():
+                if owner.sandboxed:
+                    from core.windows_plugin_sandbox import run_sandboxed
+                    try:
+                        return run_sandboxed(source, name, args, owner.timeout, context.cancelled)
+                    finally:
+                        self.ctx.log(f"{name}: AppContainer invocation ended")
                 if owner.isolated:
                     from core.plugin_process import run_isolated
                     return run_isolated(owner.path, name, args, owner.timeout, context.cancelled, source=source)
@@ -349,7 +412,7 @@ class PluginManager:
                         self._inflight.pop(owner.name, None)
             future.add_done_callback(finished)
         try:
-            res = future.result(timeout=owner.timeout + 3 if owner.isolated else owner.timeout)
+            res = future.result(timeout=owner.timeout + (35 if owner.sandboxed else 3 if owner.isolated else 0))
         except TimeoutError:
             context.cancelled.set()
             future.cancel()
@@ -380,7 +443,7 @@ class PluginManager:
                     "plugin": loaded.name,
                     "version": loaded.version,
                     "health": loaded.health,
-                    "trust": "trusted_native",
+                    "trust": "appcontainer" if loaded.sandboxed else "trusted_native",
                     "tools": sorted(loaded.tools),
                     "capabilities": loaded.capabilities,
                     "timeout": loaded.timeout,
@@ -419,7 +482,15 @@ class PluginManager:
     def poll(self) -> bool:
         """Reload if the folder changed. Returns True if the tool list changed."""
         current = {str(f): self._stamp(f) for f in self._files()}
-        if current == self._mtimes and _trusted_plugins() == self._trust:
+        sandbox = _sandbox_manifest()
+        with self._lock:
+            for name, (_, context) in self._inflight.items():
+                loaded = self.loaded.get(name)
+                if loaded and loaded.sandboxed:
+                    relative = loaded.path.relative_to(PLUGIN_DIR).as_posix()
+                    if sandbox.get(relative) != self._sandbox.get(relative):
+                        context.cancelled.set()
+        if current == self._mtimes and _trusted_plugins() == self._trust and sandbox == self._sandbox:
             return False
         before = json.dumps(self.declarations(), sort_keys=True, default=str)
         self.load_all()
