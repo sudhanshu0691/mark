@@ -27,6 +27,9 @@ class BudgetExceeded(RuntimeError):
 
 @contextmanager
 def task_budget():
+    if _task_usage.get() is not None:
+        yield
+        return
     token = _task_usage.set({})
     try:
         yield
@@ -77,6 +80,9 @@ def initialize(name, cfg):
     key = get_secret(name)
     with _lock:
         status = _stats.setdefault(name, {"state": "INITIALIZING", "requests": 0, "tokens": 0})
+        existing = _clients.get(name)
+        if key and existing and existing[0] == key:
+            return "CONFIGURED"
     if not key:
         with _lock:
             status["state"] = "NOT_CONFIGURED"
@@ -132,4 +138,8 @@ def close():
         for item in _stats.values():
             item["state"] = "STOPPED"
     for _, client in clients:
-        client.close()
+        try:
+            client.close()
+        except Exception:
+            # One broken transport must not prevent the others closing.
+            pass

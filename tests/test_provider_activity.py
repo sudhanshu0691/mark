@@ -18,3 +18,14 @@ def test_provider_status_returns_to_sleep_after_success_and_failure(monkeypatch)
         pass
     assert events == ['groq', 'sleep']
 
+
+
+def test_nested_task_budget_does_not_reset_usage():
+    import pytest
+    from core import providers
+    cfg = {"cloud_limits": {"requests_per_task": 1}}
+    with providers.task_budget():
+        providers.reserve("groq", cfg)
+        with providers.task_budget():
+            with pytest.raises(providers.BudgetExceeded):
+                providers.reserve("gemini", cfg)

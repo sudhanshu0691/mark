@@ -130,22 +130,33 @@ class LiveKitAgentWorker:
                 active = await asyncio.to_thread(db.get_active_conversation)
                 conversation_id = active["id"] if active else None
                 loop = asyncio.get_running_loop()
-                queue = asyncio.Queue()
+                queue = asyncio.Queue(maxsize=64)
+                overflow = False
                 buffer = SentenceBuffer()
                 streamed = False
+                def enqueue(value):
+                    nonlocal overflow
+                    if overflow or self._cancel.is_set():
+                        return
+                    try:
+                        queue.put_nowait(value)
+                    except asyncio.QueueFull:
+                        # Preserve the final answer in the database; stop incremental
+                        # delivery rather than accumulating unlimited queued audio.
+                        overflow = True
                 def delta(value):
                     if not self._cancel.is_set():
-                        loop.call_soon_threadsafe(queue.put_nowait, value)
+                        loop.call_soon_threadsafe(enqueue, value)
                 async def consume():
                     nonlocal streamed
                     while True:
                         value = await queue.get()
                         if value is None:
                             tail = buffer.flush()
-                            if tail and not self._cancel.is_set():
+                            if tail and not overflow and not self._cancel.is_set():
                                 await self.speak_text(tail)
                             return
-                        if self._cancel.is_set():
+                        if self._cancel.is_set() or overflow:
                             continue
                         streamed = True
                         await self._room.local_participant.publish_data(
@@ -170,7 +181,13 @@ class LiveKitAgentWorker:
                     await asyncio.to_thread(db.append_conversation_turn, text, head,
                                             channel="voice", conversation_id=conversation_id)
                 finally:
-                    await queue.put(None)
+                    if not consumer.done():
+                        # A failed consumer must not leave a producer blocked on a full queue.
+                        sentinel = asyncio.create_task(queue.put(None))
+                        await asyncio.wait((sentinel, consumer), return_when=asyncio.FIRST_COMPLETED)
+                        if not sentinel.done():
+                            sentinel.cancel()
+                            await asyncio.gather(sentinel, return_exceptions=True)
                     try:
                         await consumer
                     except Exception as exc:
@@ -179,6 +196,8 @@ class LiveKitAgentWorker:
                     await self.send_text(head)
                     if not streamed:
                         await self.speak_text(head[:1800])
+                    elif overflow:
+                        await self.speak_text("The full response is available in text.")
             finally:
                 lock.release()
 

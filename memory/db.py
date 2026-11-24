@@ -32,6 +32,7 @@ CATEGORIES = ("identity", "preferences", "projects", "relationships", "wishes", 
 MAX_CONVERSATION_TURNS = 100
 
 FTS_ENABLED = False
+_initialized_db = None
 
 
 def _connect() -> sqlite3.Connection:
@@ -43,7 +44,13 @@ def _connect() -> sqlite3.Connection:
 
 
 def init_db() -> None:
+    global _initialized_db
     with _lock:
+        path = DB_PATH.resolve()
+        if _initialized_db is not None and path.exists():
+            stat = path.stat()
+            if _initialized_db == (path, stat.st_dev, stat.st_ino):
+                return
         conn = _connect()
         try:
             conn.executescript("""
@@ -99,7 +106,16 @@ def init_db() -> None:
             conn.commit()
         finally:
             conn.close()
-    _migrate_if_needed()
+        _migrate_if_needed()
+        # Legacy migration can insert turns without a conversation ID.
+        conn = _connect()
+        try:
+            _ensure_default_conversation(conn)
+            conn.commit()
+        finally:
+            conn.close()
+        stat = path.stat()
+        _initialized_db = (path, stat.st_dev, stat.st_ino)
 
 
 def _ensure_fts(conn: sqlite3.Connection) -> None:

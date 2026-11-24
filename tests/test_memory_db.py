@@ -86,3 +86,23 @@ def test_explicit_local_recall_preserves_session_and_avoids_cloud(tmp_path, monk
     assert "first answer" in answer
     assert "private other answer" not in answer
     assert db.get_active_conversation()["id"] == second
+
+
+def test_schema_initialized_once_per_database(tmp_path, monkeypatch):
+    from memory import db
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "once.db")
+    monkeypatch.setattr(db, "LEGACY_LONG_TERM", tmp_path / "missing-long.json")
+    monkeypatch.setattr(db, "LEGACY_CONVERSATION", tmp_path / "missing-history.json")
+    calls = []
+    original = db._ensure_columns
+    def counted(conn):
+        calls.append(1)
+        return original(conn)
+    monkeypatch.setattr(db, "_ensure_columns", counted)
+    db.init_db()
+    db.append_conversation_turn("hello", "hi")
+    db.load_conversation_turns()
+    assert len(calls) == 1
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "other.db")
+    db.init_db()
+    assert len(calls) == 2
