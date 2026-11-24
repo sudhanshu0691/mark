@@ -41,8 +41,10 @@ WANT = [
     ("win32com.client", "Windows COM", True),
     ("wmi", "hardware sensors", True),
     ("comtypes", "volume control", True),
-    ("transformers", "local image/NLP models", True),
-    ("torch", "local model backend", True),
+    ("livekit.rtc", "LiveKit voice transport", True),
+    ("livekit.api", "LiveKit room authentication", True),
+    ("faster_whisper", "local speech recognition", True),
+    ("torch", "local computer vision backend", True),
     ("winocr", "Windows OCR", True),
 ]
 
@@ -52,8 +54,9 @@ OPTIONAL_NOTES = {
     "wmi": "missing => temperature sensors unavailable (battery/disk still work)",
     "playwright": "missing => browser_control falls back to native-browser mode",
     "pynvml": "missing => GPU % reads as N/A",
-    "transformers": "missing => local image/NLP adapters unavailable",
-    "torch": "missing => local transformers backend unavailable",
+    "livekit.rtc": "missing => install the livekit extra with uv",
+    "livekit.api": "missing => install the livekit extra with uv",
+    "torch": "missing => local computer vision backend unavailable",
     "winocr": "missing => install a Tesseract engine for OCR instead",
 }
 
