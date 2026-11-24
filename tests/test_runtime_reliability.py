@@ -63,6 +63,7 @@ def test_live_reconnect_reuses_handle_then_restores_history(history, monkeypatch
 
 
 def test_typed_commands_save_and_restore(history, monkeypatch):
+    monkeypatch.setattr(llm, "load_config", lambda: {**llm.DEFAULTS, "share_history_with_cloud": True})
     live = MarkLive(Mock())
     live._all_declarations = lambda: []
     live._dispatch_sync = Mock(return_value="[DONE] system status")
@@ -72,6 +73,10 @@ def test_typed_commands_save_and_restore(history, monkeypatch):
     monkeypatch.setattr(brain, "run_goal", planner)
     MarkLive(live.ui)._run_local_command("plan a related task")
     assert any(msg["content"] == "system info" for msg in planner.call_args.kwargs["history"])
+    monkeypatch.setattr(llm, "load_config", lambda: {**llm.DEFAULTS, "share_history_with_cloud": False})
+    MarkLive(live.ui)._run_local_command("plan another related task")
+    assert planner.call_args.kwargs["history"] == []
+    assert any(turn["user"] == "system info" for turn in history.load_conversation_turns())
 
 
 @pytest.mark.parametrize("args", [
