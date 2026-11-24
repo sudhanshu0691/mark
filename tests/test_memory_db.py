@@ -49,3 +49,22 @@ def test_conversation_history_is_not_pruned_or_truncated(tmp_path, monkeypatch):
         assert conn.execute("SELECT COUNT(*) FROM conversation_turns").fetchone()[0] == 101
         assert conn.execute("SELECT user FROM conversation_turns ORDER BY id LIMIT 1").fetchone()[0] == long_text
     assert len(db.load_conversation_turns()) == 100
+
+
+def test_conversation_search_is_scoped(tmp_path, monkeypatch):
+    from memory import db
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "search.db")
+    monkeypatch.setattr(db, "LEGACY_LONG_TERM", tmp_path / "missing.json")
+    monkeypatch.setattr(db, "LEGACY_CONVERSATION", tmp_path / "missing2.json")
+    first = db.start_conversation("first")
+    db.append_conversation_turn("orchid project", "first result", conversation_id=first)
+    second = db.start_conversation("second")
+    db.append_conversation_turn("orchid project", "second result", conversation_id=second)
+    rows = db.search_conversation_turns("orchid", conversation_id=first)
+    assert [r["assistant"] for r in rows] == ["first result"]
+    assert db.get_active_conversation()["id"] == second
+
+def test_private_context_is_not_loaded(monkeypatch):
+    from memory import conversation
+    monkeypatch.setattr(conversation, "recent_messages", lambda **kwargs: (_ for _ in ()).throw(AssertionError("private history read")))
+    assert conversation.build_turn_context("hello", share_cloud=False) == ([], "")

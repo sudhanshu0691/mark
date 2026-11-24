@@ -106,12 +106,12 @@ def _recursive_update(target: dict, updates: dict) -> bool:
 def update_memory(memory_update: dict) -> dict:
     if not isinstance(memory_update, dict) or not memory_update:
         return load_memory()
-    memory = load_memory()
-    memory = _trim_to_limit(memory)
-    if _recursive_update(memory, memory_update):
-        save_memory(memory)
-        print(f"[Memory] 💾 Saved: {list(memory_update.keys())}")
-    return memory
+    with _lock:
+        memory = load_memory()
+        if _recursive_update(memory, memory_update):
+            save_memory(memory)
+            print(f"[Memory] 💾 Saved: {list(memory_update.keys())}")
+        return memory
 
 def format_memory_for_prompt(memory: dict | None) -> str:
     if not memory:

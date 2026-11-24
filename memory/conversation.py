@@ -223,3 +223,21 @@ def recent_messages(channel=None, budget=4800, conversation_id=None) -> list[dic
         messages.append([{"role": "user", "content": user}, {"role": "assistant", "content": reply}])
         budget -= size
     return [message for pair in reversed(messages) for message in pair]
+
+
+def build_turn_context(query, *, conversation_id=None, share_cloud=False):
+    """Return bounded, conversation-scoped context only with explicit sharing enabled."""
+    if not share_cloud:
+        return [], ""
+    from memory import db
+    from memory.memory_manager import load_memory, format_memory_for_prompt
+    from core.cloud_privacy import redact_text
+    history = recent_messages(conversation_id=conversation_id)
+    seen = {(m["role"], m["content"]) for m in history}
+    snippets = []
+    for turn in db.search_conversation_turns(query, conversation_id=conversation_id, limit=4):
+        if ("user", turn["user"][:800]) not in seen:
+            snippets.append({"user": turn["user"][:400], "assistant": turn["assistant"][:500]})
+    facts = format_memory_for_prompt(load_memory())[:1500]
+    context = json.dumps({"stored_facts": facts, "relevant_earlier_turns": snippets}, ensure_ascii=False)
+    return history, redact_text(context[:4000])
