@@ -21,6 +21,7 @@ class LiveKitAgentWorker:
         self._turn_lock = asyncio.Lock()
         self._tasks = set()
         self._receivers = set()
+        self._track_tasks = {}
         self._turn_task = None
         self._pending_text = None
         self._cancel = asyncio.Event()
@@ -29,6 +30,8 @@ class LiveKitAgentWorker:
         from livekit import rtc
         if not self.markdown_adapter or not self.stt_engine or not self.tts_engine:
             raise RuntimeError("MARK voice adapters are not configured")
+        if self._room is not None:
+            await self.stop()
         await self.stt_engine.load()
         await self.tts_engine.load()
         self._room = room
@@ -40,6 +43,8 @@ class LiveKitAgentWorker:
 
         @room.on("disconnected")
         def disconnected(*args):
+            if self._room is not room:
+                return
             self._is_running = False
             self._cancel.set()
             self._pending_text = None
@@ -48,15 +53,37 @@ class LiveKitAgentWorker:
 
         @room.on("track_subscribed")
         def subscribed(track, publication, remote):
+            if self._room is not room or not self._is_running:
+                return
             if track.kind != rtc.TrackKind.KIND_AUDIO:
                 return
             # Explicitly configured remote identity; never process arbitrary room users.
             allowed = getattr(self, "allowed_identity", None)
             if not allowed or remote.identity != allowed:
                 return
+            key = getattr(publication, "sid", None) or id(track)
+            existing = self._track_tasks.get(key)
+            if existing is not None and not existing.done():
+                return
             task = asyncio.create_task(self._receive_audio(track))
+            self._track_tasks[key] = task
             self._receivers.add(task)
-            task.add_done_callback(self._receivers.discard)
+            def finished(done):
+                self._receivers.discard(done)
+                if self._track_tasks.get(key) is done:
+                    self._track_tasks.pop(key, None)
+                if not done.cancelled() and done.exception() is not None:
+                    logger.warning("Audio receiver failed: %s", type(done.exception()).__name__)
+            task.add_done_callback(finished)
+
+        @room.on("track_unsubscribed")
+        def unsubscribed(track, publication, remote):
+            if self._room is not room:
+                return
+            key = getattr(publication, "sid", None) or id(track)
+            task = self._track_tasks.get(key)
+            if task is not None:
+                task.cancel()
 
         for remote in room.remote_participants.values():
             for publication in remote.track_publications.values():
@@ -247,7 +274,13 @@ class LiveKitAgentWorker:
         # Let in-flight tool workers observe cancellation before disconnecting.
         if self._tasks:
             await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
-        if self._room:
-            await self._room.disconnect()
+        room, source = self._room, self._source
         self._room = None
         self._source = None
+        self._track_tasks.clear()
+        try:
+            if room:
+                await room.disconnect()
+        finally:
+            if source and hasattr(source, "aclose"):
+                await source.aclose()

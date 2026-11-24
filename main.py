@@ -815,9 +815,11 @@ class MarkLive:
         Returns:
             True if connection was successful
         """
-        if self._livekit_connected:
+        if self._livekit_connected and self._livekit_worker and self._livekit_worker._is_running:
             logger.info("Already connected to LiveKit")
             return True
+        if self._livekit_worker is not None:
+            await self.disconnect_livekit()
 
         if not LIVEKIT_AVAILABLE:
             logger.warning("LiveKit SDK not available")
@@ -839,16 +841,17 @@ class MarkLive:
 
             # Initialize STT engine
             from core._speech_stt import STTEngine
-            stt_engine = STTEngine(
-                model_size="base",
-                device="cpu",
-                compute_type="int8",
-                language=None,  # auto-detect
-            )
+            stt_engine = getattr(self, "_livekit_stt_engine", None)
+            if stt_engine is None:
+                stt_engine = STTEngine(model_size="base", device="cpu", compute_type="int8", language=None)
+                self._livekit_stt_engine = stt_engine
 
             # Initialize TTS engine
             from core._tts import PiperTTSEngine
-            tts_engine = PiperTTSEngine()
+            tts_engine = getattr(self, "_livekit_tts_engine", None)
+            if tts_engine is None:
+                tts_engine = PiperTTSEngine()
+                self._livekit_tts_engine = tts_engine
 
             # Create the LiveKit agent worker
             from core._livekit_worker import LiveKitAgentWorker

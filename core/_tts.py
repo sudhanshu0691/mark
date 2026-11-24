@@ -13,6 +13,8 @@ class PiperTTSEngine:
         self._lock = asyncio.Lock()
 
     async def load(self):
+        if self._tts is not None:
+            return
         from actions.phone.speech import load_config, make_tts
         cfg = load_config()
         if self.model_path:
