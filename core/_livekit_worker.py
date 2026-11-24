@@ -186,8 +186,7 @@ class LiveKitAgentWorker:
                         if self._cancel.is_set() or overflow:
                             continue
                         streamed = True
-                        await self._room.local_participant.publish_data(
-                            value.encode("utf-8"), reliable=True, topic="mark.response.delta")
+                        await self._publish_text(value, "mark.response.delta")
                         for sentence in buffer.feed(value):
                             if not self._cancel.is_set():
                                 await self.speak_text(sentence)
@@ -228,10 +227,15 @@ class LiveKitAgentWorker:
             finally:
                 lock.release()
 
+    async def _publish_text(self, text, topic):
+        identity = getattr(self, "allowed_identity", None)
+        if self._is_running and self._room and identity:
+            await self._room.local_participant.publish_data(
+                text.encode("utf-8"), reliable=True, topic=topic,
+                destination_identities=[identity])
+
     async def send_text(self, text):
-        if self._is_running and self._room:
-            await self._room.local_participant.publish_data(text.encode("utf-8"), reliable=True,
-                                                             topic="mark.response")
+        await self._publish_text(text, "mark.response")
 
     async def speak_text(self, text):
         from livekit import rtc

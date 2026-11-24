@@ -58,3 +58,9 @@ vision_department/config/model_config.yaml
 # Generated verification reports
 /test-results.xml
 /coverage.xml
+
+# Local distribution outputs
+/build/
+/dist/
+/release/
+/*.spec

@@ -44,3 +44,17 @@ def test_duplicate_subscription_and_stale_room(monkeypatch):
         assert worker._room is None
         assert source.aclose.await_count == 2
     asyncio.run(run())
+
+
+def test_response_data_is_only_sent_to_authorized_identity():
+    async def run():
+        worker = LiveKitAgentWorker()
+        publish = AsyncMock()
+        worker._room = SimpleNamespace(local_participant=SimpleNamespace(publish_data=publish))
+        worker._is_running = True
+        await worker.send_text("private")
+        publish.assert_not_awaited()
+        worker.allowed_identity = "owner"
+        await worker.send_text("private")
+        publish.assert_awaited_once_with(b"private", reliable=True, topic="mark.response", destination_identities=["owner"])
+    asyncio.run(run())

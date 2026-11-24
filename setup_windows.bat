@@ -9,7 +9,7 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-uv sync --python 3.11 --extra livekit --extra vision --no-dev
+uv sync --locked --python 3.11 --extra livekit --extra vision --no-dev
 if errorlevel 1 (
     echo Dependency setup failed. See the uv error above.
     pause
