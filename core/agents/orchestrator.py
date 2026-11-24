@@ -82,7 +82,7 @@ class MasterOrchestrator:
         """Execute direct inference without deep reasoning."""
         result = await self.inference_manager.process_query(user_query)
         return {
-            "status": "completed",
+            "status": result.get("status", "failed"),
             "response": result.get("response", ""),
             "model": result.get("model", "ollama"),
             "intent": intent.value,
@@ -110,17 +110,19 @@ class MasterOrchestrator:
         observations = []
         for turn in range(max_turns):
             result = await self.inference_manager.process_query(user_query)
-            if result.get("status") == "completed" and result.get("response"):
-                break
             observations.append({
                 "turn": turn,
                 "response": result.get("response", ""),
                 "model": result.get("model", ""),
             })
+            if result.get("status") == "completed" and result.get("response"):
+                break
+            if result.get("error"):
+                break
         return {
-            "status": "completed",
+            "status": result.get("status", "failed"),
             "response": observations[-1].get("response", "") if observations else "",
-            "reasoning_turns": max_turns,
+            "reasoning_turns": len(observations),
             "observations": observations,
             "intent": intent.value,
             "complexity": complexity.value,
@@ -131,7 +133,7 @@ class MasterOrchestrator:
         """Execute enhanced reasoning with structured planning."""
         result = await self.inference_manager.process_query(user_query)
         return {
-            "status": "completed",
+            "status": result.get("status", "failed"),
             "response": result.get("response", ""),
             "reasoning_depth": "enhanced",
             "intent": intent.value,

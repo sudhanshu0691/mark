@@ -39,6 +39,7 @@ class InferenceManager:
         conversation_history: Optional[List[dict]] = None,
         force_model: Optional[str] = None,
         force_intent: Optional[Intent] = None,
+        tools: Optional[List[dict]] = None,
     ) -> dict:
         """
         Process a user query through the adaptive intelligence engine.
@@ -77,7 +78,6 @@ class InferenceManager:
         )
 
         # Step 6: Execute inference
-        tools = None  # Will be passed by caller
 
         try:
             response = await provider.chat(
@@ -88,6 +88,7 @@ class InferenceManager:
             )
 
             result = {
+                "status": "completed",
                 "response": response.get("content", ""),
                 "model": model or "ollama",
                 "intent": intent,
@@ -102,6 +103,7 @@ class InferenceManager:
         except Exception as e:
             logging.error("Inference error: %s: %s", type(e).__name__, e)
             return {
+                "status": "failed",
                 "response": f"I encountered an error: {str(e)}",
                 "model": model or "ollama",
                 "intent": intent,

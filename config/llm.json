@@ -2,7 +2,6 @@
   "backend": "multi_provider",
   "routing": "automatic",
   "primary_provider": "groq",
-
   "providers": {
     "groq": {
       "base_url": "https://api.groq.com/openai/v1",
@@ -40,7 +39,7 @@
         "complex_reasoning": 0.5,
         "planning": 0.5,
         "coding": 0.3,
-        "vision_analysis": 1.0
+        "vision_analysis": 1
       }
     },
     "ollama": {
@@ -62,27 +61,21 @@
       }
     }
   },
-
   "stream": true,
   "automatic_fallback": true,
   "share_history_with_cloud": false,
   "free_tier_only": true,
-
   "cloud_limits": {
-    "requests_per_day": -1,
-    "requests_per_task": -1
+    "requests_per_day": 0,
+    "requests_per_task": 12
   },
-
   "stream_text": true,
-
   "verified_free_models": [
     "qwen/qwen3.8-27b",
     "openai/gpt-oss-120b",
     "gemini-3.1-flash-lite"
   ],
-
   "allow_cloud_vision": true,
-
   "privacy": {
     "redact_sensitive_before_cloud": true,
     "never_send_passwords": true,
