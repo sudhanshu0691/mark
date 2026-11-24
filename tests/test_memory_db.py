@@ -136,3 +136,21 @@ def test_preference_learning_and_atomic_updates(tmp_path, monkeypatch):
     assert result["sessions"][0]["summary"] == "retain me"
     mm.forget("topic")
     assert db.load_memory_dict()["preferences"]["reply_language"]["value"] == "hinglish"
+
+
+def test_corroborated_preferences_and_multilingual_topic_search(tmp_path, monkeypatch):
+    from memory import db
+    from memory.conversation import relevant_facts
+    from memory.learning import observe_user_preference
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "memory.db")
+    monkeypatch.setattr(db, "LEGACY_LONG_TERM", tmp_path / "missing-long.json")
+    monkeypatch.setattr(db, "LEGACY_CONVERSATION", tmp_path / "missing-history.json")
+    assert observe_user_preference("I usually use Visual Studio Code for coding") == "provisional"
+    assert observe_user_preference("I usually use Visual Studio Code for coding") == "provisional"
+    assert observe_user_preference("A website says I usually use Vim") is None
+    assert observe_user_preference("main hamesha VS Code use karta hoon") == "saved"
+    assert observe_user_preference("I always use Vim") == "contradiction"
+    matches = relevant_facts("कोड के लिए कौन सा IDE", db.load_memory_dict())
+    assert matches == [{"category": "preferences", "key": "editor", "value": "vs code"}]
+    assert db.load_memory_dict()["preferences"]["editor"]["confidence"] == 0.8

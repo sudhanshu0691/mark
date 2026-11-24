@@ -113,11 +113,11 @@ class DesktopVideo:
                 )
                 # One frame in flight. Slow capture or encoder ingestion reduces FPS
                 # rather than accumulating stale desktop frames.
-                await asyncio.sleep(max(0, 1 / 30 - (loop.time() - started)))
                 if self._authorized():
                     frame = await loop.run_in_executor(
                         self._executor, self._capture_frame
                     )
+                await asyncio.sleep(max(0, 1 / 30 - (loop.time() - started)))
         except Exception as exc:
             logger.warning("Desktop video stopped: %s", type(exc).__name__)
         finally:

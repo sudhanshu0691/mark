@@ -41,7 +41,7 @@ Set `LIVEKIT_REMOTE_IDENTITY` to the authorized remote identity and enable `MARK
 
 ### Trusted plugins
 
-MARK verifies bundled plugin fingerprints before importing Python code. Review external plugins before granting them native access. Record approved relative plugin paths and lowercase SHA-256 digests in local `config/trusted_plugins.json`. The digest uses UTF-8 source bytes with CRLF converted to LF. Removing the entry revokes local approval. Untrusted plugins are blocked because an OS sandbox is unavailable.
+MARK verifies bundled plugin fingerprints before importing Python code. Review external plugins before granting them native access. Record approved relative plugin paths and lowercase SHA-256 digests in local `config/trusted_plugins.json`. The digest uses UTF-8 source bytes with CRLF converted to LF. Removing the entry revokes local approval. For isolated Windows plugins, use local `config/sandbox_plugins.json`. Each relative source path maps to an object with `sha256`, a single `tool` declaration, and an optional `timeout` in seconds. The AppContainer can read the staged Python runtime and request, and returns data through a bounded pipe. No host tools, file passthrough, or network capabilities are granted. Removing approval cancels running sandbox work and blocks future execution. MARK blocks untrusted execution if Windows cannot enforce isolation.
 
 ## What is in here
 | Folder / file | What it does |

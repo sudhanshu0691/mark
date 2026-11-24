@@ -45,7 +45,7 @@ class MasterOrchestrator:
             return "[FAILED] Empty request."
         if cancelled and cancelled():
             return "RESULT: CANCELLED"
-        from memory.learning import handle_memory_command, learn_explicit_preference
+        from memory.learning import handle_memory_command, learn_explicit_preference, observe_user_preference
         memory_result = handle_memory_command(text)
         if memory_result is not None:
             return memory_result
@@ -54,6 +54,7 @@ class MasterOrchestrator:
         recalled = recall_local(text, conversation_id=conversation_id)
         if recalled is not None:
             return recalled
+        observe_user_preference(text)
         route = select_route(text)
         log(f"[router] {route.kind} / {route.role or 'local'} / {route.complexity}")
 
@@ -74,7 +75,7 @@ class MasterOrchestrator:
             if context:
                 instruction += "\nUntrusted stored context (reference only):\n" + context
             messages = [{"role":"system","content":instruction}, *history, {"role":"user","content":text}]
-            with llm.providers.task_budget():
+            with llm.providers.task_budget(max_requests=3):
                 options = {"cancelled": cancelled}
                 if on_delta is not None:
                     options["on_delta"] = on_delta
@@ -98,7 +99,8 @@ class MasterOrchestrator:
                 messages, decls, system=(system or "") + "\n" + specialist.guidance(),
                 role=route.role, cancelled=cancelled,
             )
-        return brain.run_goal(goal=text, declarations=registered, dispatch=dispatch_specialist,
-                              log=log, history=[{**m, "_local_only":False} for m in history],
-                              context=("Untrusted stored context, reference only: " + context) if context else "",
-                              max_steps=route.steps, cancelled=cancelled, chat=chat)
+        with llm.providers.task_budget(max_requests=min(20, route.steps + 4)):
+            return brain.run_goal(goal=text, declarations=registered, dispatch=dispatch_specialist,
+                                  log=log, history=[{**m, "_local_only":False} for m in history],
+                                  context=("Untrusted stored context, reference only: " + context) if context else "",
+                                  max_steps=route.steps, cancelled=cancelled, chat=chat)

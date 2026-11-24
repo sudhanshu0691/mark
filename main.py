@@ -649,7 +649,7 @@ TOOL_DECLARATIONS = [
         "Processes any file that the user has uploaded or dropped onto the interface. "
         "Use this when the user refers to an uploaded file and wants an action on it. "
         "Supports: images (describe/ocr/resize/compress/convert), "
-        "PDFs (create, merge, split, rotate, reorder, extract pages, OCR, searchable PDF, image conversion), "
+        "PDFs (create, merge, split, rotate, reorder, extract pages, summarize locally, OCR, searchable PDF, image conversion), "
         "Word docs (create, edit, find_replace, convert to PDF, analyze), "
         "CSV (analyze/stats/filter/sort/convert); for Excel workbooks use the dedicated excel tool, "
         "JSON/XML (validate/format/analyze), "
@@ -1735,6 +1735,8 @@ class MarkLive:
                             if full_in:
                                 self.ui.write_log(f"You: {full_in}")
                                 self._session_log.append(f"User: {full_in}")
+                                from memory.learning import observe_user_preference
+                                await asyncio.to_thread(observe_user_preference, full_in)
 
                             full_out = " ".join(out_buf).strip()
                             if full_out:
@@ -2390,5 +2392,35 @@ def main():
         worker.join(timeout=5)
         _llm_boot.providers.close()
 
+def check_startup():
+    """Start the desktop UI and inspect its real plugin registry without cloud calls."""
+    from PySide6.QtCore import QTimer
+
+    started = time.perf_counter()
+    ui = MarkUI("assets/face.png")
+    runtime = MarkLive(ui)
+    try:
+        runtime.plugins.load_all(BUILTIN_NAMES)
+        missing = {"excel", "ppt_studio"} - set(runtime.plugins.tool_names())
+        if missing:
+            print(f"Required tools failed to load: {', '.join(sorted(missing))}")
+            return 1
+        ui.show()
+        def close_probe():
+            ui.close()
+            ui.app.quit()
+
+        QTimer.singleShot(0, close_probe)
+        ui.app.exec()
+        print(f"Desktop startup and shutdown completed in {time.perf_counter() - started:.3f}s")
+        return 0
+    finally:
+        runtime.plugins.stop()
+        if not ui._closing:
+            ui.close()
+
+
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--check-startup"]:
+        raise SystemExit(check_startup())
     main()

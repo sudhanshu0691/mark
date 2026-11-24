@@ -375,3 +375,35 @@ def test_repeated_specialist_write_is_not_dispatched_twice():
     assert specialist.execute("send_email", {}) == "[DONE]"
     assert specialist.execute("send_email", {}).startswith("[UNVERIFIED]")
     assert actions == ["send_email"]
+
+
+def test_workflow_binds_analysis_only_to_literal_presentation_content(monkeypatch):
+    from core.agents.specialist import SpecialistExecutor
+    from core.agents.workflow import Workflow
+    from plugins.ppt_studio import DECLARATION
+
+    monkeypatch.setattr(llm, "chat_raw", lambda *a, **k: {"content": "Drafted notes"})
+    calls = []
+    specialist = SpecialistExecutor(
+        [DECLARATION],
+        lambda name, args: calls.append((name, args)) or "[DONE]",
+    )
+    draft = {"id": "draft", "agent": "reasoning", "instruction": "Write notes"}
+    step = {
+        "id": "save",
+        "agent": "presentations",
+        "tool": "ppt_studio",
+        "depends_on": ["draft"],
+        "arguments": '{"action":"notes","path":"report.pptx","text":{"$result":"draft"}}',
+    }
+    result = Workflow(specialist, None, lambda _: None).execute(
+        {"tasks": [draft, step]}
+    )
+    assert result.startswith("[DONE]"), result
+    assert calls[0][1]["text"] == "Drafted notes"
+    step["arguments"] = '{"action":"notes","path":{"$result":"draft"}}'
+    result = Workflow(specialist, None, lambda _: None).execute(
+        {"tasks": [draft, step]}
+    )
+    assert result.startswith("[FAILED]")
+    assert len(calls) == 1

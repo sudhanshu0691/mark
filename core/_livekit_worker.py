@@ -6,6 +6,7 @@ import logging
 import re
 from uuid import uuid4
 from core.voice_stream import SentenceBuffer
+from core._vad import VoiceActivityDetector
 
 logger = logging.getLogger(__name__)
 
@@ -44,13 +45,12 @@ class LiveKitAgentWorker:
         await self.tts_engine.load()
         self._room = room
         identity = getattr(self, "allowed_identity", None)
-        if self.desktop_video_allowed:
-            if not identity:
-                raise RuntimeError("Desktop video requires an authorized participant.")
-            room.local_participant.set_track_subscription_permissions(
-                allow_all_participants=False,
-                participant_permissions=[rtc.ParticipantTrackPermission(participant_identity=identity, allow_all=True)],
-            )
+        if not identity:
+            raise RuntimeError("LiveKit requires an authorized participant identity.")
+        room.local_participant.set_track_subscription_permissions(
+            allow_all_participants=False,
+            participant_permissions=[rtc.ParticipantTrackPermission(participant_identity=identity, allow_all=True)],
+        )
         self._source = rtc.AudioSource(24000, 1)
         track = rtc.LocalAudioTrack.create_audio_track("mark-speech", self._source)
         await room.local_participant.publish_track(track)
@@ -119,30 +119,19 @@ class LiveKitAgentWorker:
 
     async def _receive_audio(self, track):
         from livekit import rtc
-        import numpy as np
         stream = rtc.AudioStream(track, sample_rate=16000, num_channels=1)
-        frames = bytearray()
-        silence = 0
+        detector = VoiceActivityDetector()
         try:
             async for event in stream:
                 if not self._is_running:
                     break
-                data = bytes(event.frame.data)
-                samples = np.frombuffer(data, dtype="<i2").astype(np.float32)
-                voiced = bool(samples.size and np.sqrt(np.mean(samples * samples)) > 450)
-                if voiced and self._turn_task is not None and not self._turn_task.done():
+                started, utterance = detector.feed(bytes(event.frame.data), playback=self._is_speaking)
+                if started and self._turn_task is not None and not self._turn_task.done():
                     await self.interrupt()
-                if voiced or frames:
-                    frames.extend(data)
-                silence = 0 if voiced else silence + len(data)
-                if frames and (silence >= 19200 or len(frames) >= 320000):
-                    utterance = bytes(frames)
-                    frames.clear()
-                    silence = 0
-                    if len(utterance) >= 9600:
-                        text = await self.stt_engine.transcribe(utterance, 16000)
-                        if text:
-                            self.submit_text(text)
+                if utterance:
+                    text = await self.stt_engine.transcribe(utterance, 16000)
+                    if text:
+                        self.submit_text(text)
         finally:
             await stream.aclose()
 

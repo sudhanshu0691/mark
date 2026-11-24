@@ -18,7 +18,9 @@ DECLARATION = {
         "Run up to eight specialist tasks with explicit dependencies. Each task chooses one specialist. "
         "For an action, specify tool and arguments as a JSON object string. For analysis, specify instruction "
         "and use conversation, planner, reasoning, developer, research, or verifier. "
-        "Return dependency IDs in depends_on. Use only for goals with multiple distinct steps."
+        "Return dependency IDs in depends_on. For a PowerPoint text or notes field, use an argument "
+        'such as {"text": {"$result": "draft"}} to pass a declared analysis dependency as literal content. '
+        "Use only for goals with multiple distinct steps."
     ),
     "parameters": {
         "type": "OBJECT",
@@ -121,6 +123,7 @@ class Workflow:
                 arguments = json.loads(encoded)
                 if not isinstance(arguments, dict):
                     raise ValueError("Arguments must encode an object.")
+                self._validate_bindings(tool, arguments, deps)
                 signature = tool, json.dumps(arguments, sort_keys=True)
                 if signature in action_keys:
                     raise ValueError("Duplicate actions are not allowed in a workflow.")
@@ -187,12 +190,35 @@ class Workflow:
                 "Analysis was interrupted or unavailable.",
             )
 
-    def _action(self, task):
+    @staticmethod
+    def _validate_bindings(tool, arguments, dependencies):
+        action = arguments.get("action")
+        for key, value in arguments.items():
+            if not isinstance(value, dict) or "$result" not in value:
+                continue
+            if (
+                tool != "ppt_studio"
+                or key != "text"
+                or action not in {"add_text", "edit_text", "notes"}
+                or set(value) != {"$result"}
+                or value["$result"] not in dependencies
+            ):
+                raise ValueError(
+                    "Dependency references are allowed only in literal presentation text."
+                )
+
+    def _action(self, task, outcomes):
+        arguments = {
+            key: outcomes[value["$result"]].text
+            if isinstance(value, dict) and "$result" in value
+            else value
+            for key, value in task.arguments.items()
+        }
         # Invocation remains serial because the desktop and permission UI are shared.
-        result = self.specialist.execute(task.tool, task.arguments)
+        result = self.specialist.execute(task.tool, arguments)
         if result.startswith("[DONE]") and task.tool in verify.CHECKED_TOOLS:
             verdict = verify.verify_step(
-                task.tool, task.arguments, verify.default_deps(self.specialist.execute)
+                task.tool, arguments, verify.default_deps(self.specialist.execute)
             )
             if verdict.status != verify.PASS:
                 result = (
@@ -252,7 +278,7 @@ class Workflow:
                         elif self.cancelled():
                             outcome = Outcome("CANCELLED", "Request cancelled.")
                         else:
-                            outcome = self._action(task)
+                            outcome = self._action(task, outcomes)
                     except Exception as exc:
                         outcome = Outcome(
                             "UNVERIFIED" if task.tool else "FAILED", type(exc).__name__
