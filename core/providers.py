@@ -40,8 +40,8 @@ def reserve(name, cfg):
     per_task = int(limits.get("requests_per_task", 0))
     daily = int(limits.get("requests_per_day", 0))
     usage = _task_usage.get()
-    if per_task > 0 and usage is not None and usage.get(name, 0) >= per_task:
-        raise BudgetExceeded(f"{name} reached the configured per-task request budget.")
+    if per_task > 0 and usage is not None and sum(usage.values()) >= per_task:
+        raise BudgetExceeded(f"{name} reached the shared per-task request budget.")
     if daily > 0:
         day = date.today().isoformat()
         USAGE_PATH.parent.mkdir(parents=True, exist_ok=True)

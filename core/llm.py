@@ -1,8 +1,7 @@
 """
 core/llm.py - the ONE place Mark talks to a language model.
 
-Default routing: local Ollama for text and tools.
-Gemini remains an explicit alternative backend for text and live voice.
+Default routing: Groq for text and tools, Gemini for vision and cloud fallback.
 
 Every file that used to call google.genai now calls this module instead, through a
 drop-in client that looks like the old one:
@@ -58,8 +57,11 @@ DEFAULTS: dict[str, Any] = {
     "profile": "balanced",
     "backend": "multi_provider",
     "host": "http://127.0.0.1:11434",
-    "text_model": "qwen3:4b", "code_model": "qwen3:4b",
-    "fast_model": "qwen3:4b", "vision_model": "qwen2.5vl:3b",
+    "text_model": "qwen/qwen3.8-27b", "code_model": "openai/gpt-oss-120b",
+    "fast_model": "qwen/qwen3.8-27b", "vision_model": "gemini-3.1-flash-lite",
+    "primary_provider": "groq", "fallback_providers": ["gemini"],
+    "free_tier_only": True, "verified_free_models": [],
+    "share_history_with_cloud": False,
     "num_ctx": 4096, "timeout_s": 60, "keep_alive": "30m",
     "web_results": 6,
     "gemini": {"text_model": "gemini-flash-lite-latest", "live_model": "gemini-2.5-flash-native-audio-latest",
@@ -211,7 +213,9 @@ def role_for(model: str | None, has_images: bool = False) -> str:
 
 def model_for(role: str, cfg: dict | None = None) -> str:
     cfg = cfg or load_config()
-    return cfg.get(f"{role}_model") or cfg["text_model"]
+    provider = "gemini" if role == "vision" or cfg.get("backend") == "gemini" else cfg.get("primary_provider", "groq")
+    models = cfg.get("gemini", {}) if provider == "gemini" else cfg.get("providers", {}).get(provider, {})
+    return models.get(f"{role}_model") or models.get("text_model") or cfg.get(f"{role}_model") or cfg["text_model"]
 
 
 def _png_bytes(img: Any) -> bytes:
@@ -529,6 +533,8 @@ def chat_raw(messages: list[dict], role: str = "text", tools: list[dict] | None 
                           if cloud_messages[i].get("role") == "user"), -1)
         if last_user >= 0:
             cloud_messages = [m for m in cloud_messages[:last_user] if m.get("role") == "system"] + cloud_messages[last_user:]
+    from core.cloud_privacy import redact_messages
+    cloud_messages = redact_messages(cloud_messages, cfg)
     if role == "vision" and not cfg.get("allow_cloud_vision", False):
         raise LLMUnavailable("Cloud vision is not authorized.")
     if cfg.get("backend") == "gemini" or role == "vision":

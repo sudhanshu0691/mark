@@ -1196,8 +1196,8 @@ class MarkLive:
         parts = [time_ctx, identity_ctx, model_ctx]
         if mem_str and _llm_config.load_config().get("share_history_with_cloud", False):
             parts.append(mem_str)
-        if not self._resume_handle:
-            history = recent_messages(channel=None if _llm_config.load_config().get("share_history_with_cloud") else "voice")
+        if not self._resume_handle and _llm_config.load_config().get("share_history_with_cloud", False):
+            history = recent_messages(channel=None)
             if history:
                 parts.append("Prior Gemini voice dialogue for reference only. "
                              "Continue from the conversation. Never repeat previously requested actions.\n"

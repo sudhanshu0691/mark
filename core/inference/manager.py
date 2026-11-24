@@ -31,6 +31,8 @@ class InferenceManager:
         self.complexity_analyzer = ComplexityAnalyzer()
         self._routing_history: list = []
         self._max_history = 50
+        self._completed = 0
+        self._failed = 0
 
     async def process_query(
         self,
@@ -56,7 +58,7 @@ class InferenceManager:
 
         # Step 3: Record routing decision
         routing_decision = {
-            "user_query": user_query,
+            "query_length": len(user_query),
             "intent": intent.value,
             "complexity": complexity.value,
             "model": model,
@@ -100,7 +102,8 @@ class InferenceManager:
             self._record_result(result)
             return result
         except Exception as e:
-            logging.error("Inference error: %s: %s", type(e).__name__, e)
+            self._failed += 1
+            logging.error("Inference error: %s", type(e).__name__)
             return {
                 "status": "failed",
                 "response": f"I encountered an error: {str(e)}",
@@ -168,8 +171,9 @@ class InferenceManager:
             self._routing_history = self._routing_history[-self._max_history:]
 
     def _record_result(self, result: dict) -> None:
-        """Record inference result for telemetry."""
-        pass
+        """Record aggregate inference outcome without retaining user data."""
+        if result.get("status") == "completed":
+            self._completed += 1
 
     def get_routing_history(self) -> list:
         """Get routing decision history."""
@@ -179,4 +183,6 @@ class InferenceManager:
         """Get inference statistics."""
         return {
             "total_routes": len(self._routing_history),
+            "completed": self._completed,
+            "failed": self._failed,
         }

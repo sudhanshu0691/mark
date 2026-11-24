@@ -19,6 +19,8 @@ class LiveKitAgentWorker:
         self._is_speaking = False
         self._turn_lock = asyncio.Lock()
         self._tasks = set()
+        self._receivers = set()
+        self._turn_task = None
         self._cancel = asyncio.Event()
 
     async def start(self, room, participant=None):
@@ -38,7 +40,7 @@ class LiveKitAgentWorker:
         def disconnected(*args):
             self._is_running = False
             self._cancel.set()
-            for task in tuple(self._tasks):
+            for task in tuple(self._receivers):
                 task.cancel()
 
         @room.on("track_subscribed")
@@ -50,8 +52,8 @@ class LiveKitAgentWorker:
             if not allowed or remote.identity != allowed:
                 return
             task = asyncio.create_task(self._receive_audio(track))
-            self._tasks.add(task)
-            task.add_done_callback(self._tasks.discard)
+            self._receivers.add(task)
+            task.add_done_callback(self._receivers.discard)
 
         for remote in room.remote_participants.values():
             for publication in remote.track_publications.values():
@@ -71,6 +73,8 @@ class LiveKitAgentWorker:
                 data = bytes(event.frame.data)
                 samples = np.frombuffer(data, dtype="<i2").astype(np.float32)
                 voiced = bool(samples.size and np.sqrt(np.mean(samples * samples)) > 450)
+                if voiced and self._is_speaking:
+                    await self.interrupt()
                 if voiced or frames:
                     frames.extend(data)
                 silence = 0 if voiced else silence + len(data)
@@ -80,10 +84,17 @@ class LiveKitAgentWorker:
                     silence = 0
                     if len(utterance) >= 9600:
                         text = await self.stt_engine.transcribe(utterance, 16000)
-                        if text:
-                            await self.handle_text(text)
+                        if text and (self._turn_task is None or self._turn_task.done()):
+                            self._turn_task = asyncio.create_task(self.handle_text(text))
+                            self._tasks.add(self._turn_task)
+                            self._turn_task.add_done_callback(self._turn_finished)
         finally:
             await stream.aclose()
+
+    def _turn_finished(self, task):
+        self._tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.error("Voice turn failed: %s", type(task.exception()).__name__)
 
     async def handle_text(self, text):
         from core import llm, brain
@@ -161,6 +172,10 @@ class LiveKitAgentWorker:
     async def stop(self):
         self._is_running = False
         await self.interrupt()
+        for task in tuple(self._receivers):
+            task.cancel()
+        if self._receivers:
+            await asyncio.gather(*tuple(self._receivers), return_exceptions=True)
         # Let in-flight tool workers observe cancellation before disconnecting.
         if self._tasks:
             await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
