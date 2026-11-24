@@ -64,9 +64,6 @@ class ProviderRegistry:
             provider = self.providers[name]
             score = 0
 
-            if preferences.get("prefer_local", True) and name == "ollama":
-                score += 100
-
             if preferences.get("prefer_fast", False):
                 score += provider.stats.get("latency_ms", 0) * -0.01
 

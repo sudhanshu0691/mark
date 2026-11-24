@@ -4,6 +4,7 @@ PySide6>=6.7
 sounddevice
 numpy
 pandas
+groq
 google-genai             # SDK imported by the runtime. Gemini credentials and cloud use are optional.
 python-dotenv
 openpyxl>=3.1

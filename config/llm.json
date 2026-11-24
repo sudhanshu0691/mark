@@ -2,7 +2,6 @@
   "backend": "multi_provider",
   "routing": "automatic",
   "primary_provider": "groq",
-
   "providers": {
     "groq": {
       "base_url": "https://api.groq.com/openai/v1",
@@ -13,82 +12,34 @@
       "memory_model": "qwen/qwen3.8-27b",
       "planning_model": "openai/gpt-oss-120b",
       "code_model": "openai/gpt-oss-120b",
-      "routing_weights": {
-        "normal_conversation": 0.8,
-        "quick_replies": 0.9,
-        "typed_commands": 0.85,
-        "tool_selection": 0.9,
-        "tool_arg_generation": 0.9,
-        "memory_summarization": 0.7,
-        "complex_reasoning": 0.3,
-        "planning": 0.2,
-        "coding": 0.2,
-        "vision_analysis": 0.1
-      }
+      "reasoning_model": "openai/gpt-oss-120b"
     },
     "gemini": {
       "api_key_env": "GEMINI_API_KEY",
       "vision_model": "gemini-3.1-flash-lite",
-      "text_model": "gemini-1.5-flash",
-      "routing_weights": {
-        "normal_conversation": 0.1,
-        "quick_replies": 0.1,
-        "typed_commands": 0.1,
-        "tool_selection": 0.1,
-        "tool_arg_generation": 0.1,
-        "memory_summarization": 0.1,
-        "complex_reasoning": 0.5,
-        "planning": 0.5,
-        "coding": 0.3,
-        "vision_analysis": 1.0
-      }
-    },
-    "ollama": {
-      "host": "http://127.0.0.1:11434",
-      "text_model": "qwen3:4b",
-      "vision_model": "qwen2.5vl:3b",
-      "load_on_demand": true,
-      "routing_weights": {
-        "normal_conversation": 0.5,
-        "quick_replies": 0.6,
-        "typed_commands": 0.5,
-        "tool_selection": 0.4,
-        "tool_arg_generation": 0.4,
-        "memory_summarization": 0.6,
-        "complex_reasoning": 0.8,
-        "planning": 0.8,
-        "coding": 0.7,
-        "vision_analysis": 0.8
-      }
+      "text_model": "gemini-3.1-flash-lite"
     }
   },
-
-  "stream": true,
+  "stream": false,
   "automatic_fallback": true,
   "share_history_with_cloud": false,
   "free_tier_only": true,
-
   "cloud_limits": {
-    "requests_per_day": -1,
-    "requests_per_task": -1
+    "requests_per_day": 0,
+    "requests_per_task": 12
   },
-
-  "stream_text": true,
-
+  "stream_text": false,
   "verified_free_models": [
     "qwen/qwen3.8-27b",
     "openai/gpt-oss-120b",
     "gemini-3.1-flash-lite"
   ],
-
   "allow_cloud_vision": true,
-
   "privacy": {
     "redact_sensitive_before_cloud": true,
     "never_send_passwords": true,
     "never_send_api_keys": true,
     "never_send_private_screenshots": true,
-    "summarize_local_sensitive": true,
     "approved_cloud_content_categories": [
       "general_conversation",
       "tool_selection",
@@ -102,5 +53,8 @@
       "private_images",
       "personal_identifiers"
     ]
-  }
+  },
+  "fallback_providers": [
+    "gemini"
+  ]
 }

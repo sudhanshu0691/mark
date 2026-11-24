@@ -638,9 +638,7 @@ class MarkUI(QMainWindow):
         try:
             from core.llm import load_config
             llm_cfg = load_config()
-            backend = str(llm_cfg.get("backend", "ollama")).lower()
-            if backend in {"ollama", "gemini"}:
-                self._llm_provider = backend
+            self._llm_provider = "sleep"
             gemini_cfg = llm_cfg.get("gemini", {})
             self._gemini_text_state = "CONFIGURED" if gemini_cfg.get("text_model") else "NOT CONFIGURED"
             self._gemini_memory_state = "CONFIGURED" if gemini_cfg.get("memory_model") else "NOT CONFIGURED"
@@ -915,7 +913,7 @@ class MarkUI(QMainWindow):
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(4, 3, 4, 3)
         layout.setSpacing(0)
-        for provider in ("ollama", "gemini"):
+        for provider in ("groq", "gemini"):
             label = QLabel(provider.upper())
             label.setObjectName("llmName")
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)

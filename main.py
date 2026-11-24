@@ -51,9 +51,7 @@ logger = logging.getLogger(__name__)
 # LiveKit imports for real-time communication
 try:
     livekit_api = importlib.import_module("livekit.api")
-    importlib.import_module("livekit.agents")
-    importlib.import_module("livekit.agents.pipeline")
-    importlib.import_module("livekit.plugins")
+    importlib.import_module("livekit.rtc")
     LIVEKIT_AVAILABLE = True
 except ImportError:
     livekit_api = None
@@ -817,9 +815,11 @@ class MarkLive:
         Returns:
             True if connection was successful
         """
-        if self._livekit_connected:
+        if self._livekit_connected and self._livekit_worker and self._livekit_worker._is_running:
             logger.info("Already connected to LiveKit")
             return True
+        if self._livekit_worker is not None:
+            await self.disconnect_livekit()
 
         if not LIVEKIT_AVAILABLE:
             logger.warning("LiveKit SDK not available")
@@ -834,23 +834,24 @@ class MarkLive:
             self._livekit_token = _generate_livekit_token(room_name, participant_name)
 
             # Create the LiveKit agent worker
-            from core._llm_gateway import LocalLLMGateway
+            from core._llm_gateway import CloudLLMGateway
 
             # Initialize LLM gateway
-            llm_gateway = LocalLLMGateway(config_path="core/prompt.txt")
+            llm_gateway = CloudLLMGateway(config_path="core/prompt.txt")
 
             # Initialize STT engine
             from core._speech_stt import STTEngine
-            stt_engine = STTEngine(
-                model_size="base",
-                device="cpu",
-                compute_type="int8",
-                language=None,  # auto-detect
-            )
+            stt_engine = getattr(self, "_livekit_stt_engine", None)
+            if stt_engine is None:
+                stt_engine = STTEngine(model_size="base", device="cpu", compute_type="int8", language=None)
+                self._livekit_stt_engine = stt_engine
 
             # Initialize TTS engine
             from core._tts import PiperTTSEngine
-            tts_engine = PiperTTSEngine()
+            tts_engine = getattr(self, "_livekit_tts_engine", None)
+            if tts_engine is None:
+                tts_engine = PiperTTSEngine()
+                self._livekit_tts_engine = tts_engine
 
             # Create the LiveKit agent worker
             from core._livekit_worker import LiveKitAgentWorker
@@ -861,9 +862,20 @@ class MarkLive:
                 tts_engine=tts_engine,
             )
 
-            # Worker.start requires an already connected room and participant.
-            # Do not report a connection until that integration is implemented.
-            raise NotImplementedError("LiveKit room connection is not implemented")
+            from livekit import rtc
+            allowed = os.environ.get("LIVEKIT_REMOTE_IDENTITY", "").strip()
+            if not allowed or allowed == participant_name:
+                raise ValueError("Set LIVEKIT_REMOTE_IDENTITY to the authorized remote participant")
+            self._livekit_worker.allowed_identity = allowed
+            room = rtc.Room()
+            try:
+                await room.connect(livekit_cfg["url"], self._livekit_token)
+                await self._livekit_worker.start(room, room.local_participant)
+            except BaseException:
+                await room.disconnect()
+                raise
+            self._livekit_connected = True
+            return True
 
         except Exception as e:
             logger.error(f"Failed to connect to LiveKit: {e}", exc_info=True)
@@ -927,35 +939,18 @@ class MarkLive:
             if message.startswith("[brain") and "->" in message:
                 TASKS.checkpoint(tid, message[:140])
 
+        conversation_id = None
         try:
-            command = match_local_command(text)
-            if command:
-                report = self._dispatch_sync(*command)
-            else:
-                self.ui.write_log(f"{name}: working on it...")
-                cfg = _llm.load_config()
-                history = recent_messages()
-                # The configured provider receives the current request. Past conversations
-                # travel separately and the provider router strips them for cloud.
-                for message in history:
-                    message["_local_only"] = not cfg.get("share_history_with_cloud", False)
-                facts = format_memory_for_prompt(load_memory())[:1500]
-                if facts:
-                    history.insert(0, {"role": "user", "content": "Stored preferences for reference: " + facts,
-                                       "_local_only": not cfg.get("share_history_with_cloud", False)})
-                if is_conversation(text):
-                    if cfg["backend"] == "gemini" and history and not cfg.get("share_history_with_cloud"):
-                        history = []
-                    messages = [{"role": "system", "content": "Reply briefly in the user's language. Use prior dialogue for reference. If the detail is unavailable, say so. /no_think"},
-                                *history, {"role":"user","content":text}]
-                    answer = _llm.chat_raw(messages, role="fast", max_tokens=192)
-                    report = _llm_config._clean(answer.get("content", "")) or "[FAILED] Empty conversational response."
-                else:
-                    TASKS.stage(tid, "PLANNING")
-                    report = _brain.run_goal(
-                        goal=text, declarations=self._all_declarations(), dispatch=self._dispatch_sync,
-                        log=log_progress, history=history, max_steps=_brain.MAX_STEPS_DEFAULT,
-                        cancelled=self._local_cancel_event.is_set)
+            from core.agents.runtime import execute_turn
+            from memory import db
+            active = db.get_active_conversation()
+            conversation_id = active["id"] if active else None
+            report = execute_turn(text, dispatch=self._dispatch_sync,
+                                  declarations=self._all_declarations,
+                                  conversation_id=conversation_id,
+                                  cancelled=self._local_cancel_event.is_set,
+                                  log=log_progress,
+                                  on_plan=lambda: TASKS.stage(tid, "PLANNING"))
         except Exception as e:
             report = f"RESULT: FAILED\nDONE: none\nNOT DONE: local brain crashed: {type(e).__name__}: {e}"
             self.ui.write_log(f"ERR: local brain crashed: {type(e).__name__}: {e}")
@@ -964,7 +959,8 @@ class MarkLive:
         self._active_task_id = None
         head = report.split("\nEXECUTION TRACE:")[0].strip()
         self.ui.write_log(f"{name}: {head[:900]}")
-        append_conversation_turn(text, head, channel="typed")
+        from memory import db
+        db.append_conversation_turn(text, head, channel="typed", conversation_id=conversation_id)
         cfg = _llm.load_config()
         if cfg["profile"] in {"offline", "low_resource"} and cfg.get("speak_local_replies"):
             try:
@@ -995,6 +991,9 @@ class MarkLive:
         self._interrupted = True
         self._cancel_requested = True
         self._local_cancel_event.set()
+        worker = getattr(self, "_livekit_worker", None)
+        if worker is not None and self._loop and self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(worker.interrupt(), self._loop)
         if self._active_task_id is not None:
             TASKS.request_cancel(self._active_task_id)
         self._ask_after_interrupt = bool(self.session)
@@ -1166,10 +1165,8 @@ class MarkLive:
         try:
             from core import llm as _llm_info
             _llm_cfg = _llm_info.load_config()
-            _backend = str(_llm_cfg.get("backend", "ollama")).lower()
-            if _backend == "ollama":
-                _llm_route = f"Text/code tasks use local Ollama ({_llm_cfg.get('text_model')})."
-            elif _backend == "gemini":
+            _backend = str(_llm_cfg.get("backend", "multi_provider")).lower()
+            if _backend == "gemini":
                 _llm_route = f"Text/code tasks use Gemini ({_llm_cfg.get('gemini', {}).get('text_model', 'configured model')})."
             else:
                 _llm_route = f"Configured text backend: {_backend}."
@@ -1187,8 +1184,8 @@ class MarkLive:
         parts = [time_ctx, identity_ctx, model_ctx]
         if mem_str and _llm_config.load_config().get("share_history_with_cloud", False):
             parts.append(mem_str)
-        if not self._resume_handle:
-            history = recent_messages(channel=None if _llm_config.load_config().get("share_history_with_cloud") else "voice")
+        if not self._resume_handle and _llm_config.load_config().get("share_history_with_cloud", False):
+            history = recent_messages(channel=None)
             if history:
                 parts.append("Prior Gemini voice dialogue for reference only. "
                              "Continue from the conversation. Never repeat previously requested actions.\n"
@@ -2163,6 +2160,16 @@ class MarkLive:
         self._push_hud_counts()
         while True:
             cfg = _llm_config.load_config()
+            if cfg.get("voice_transport") == "livekit" and cfg["profile"] != "offline":
+                if not self._livekit_worker or not self._livekit_worker._is_running:
+                    await self.disconnect_livekit()
+                    if not await self.connect_livekit():
+                        await asyncio.sleep(5)
+                        continue
+                await asyncio.sleep(1)
+                continue
+            if getattr(self, "_livekit_connected", False):
+                await self.disconnect_livekit()
             if self._live_disabled or cfg["profile"] in {"offline", "low_resource"}:
                 await asyncio.sleep(3)
                 continue
@@ -2382,7 +2389,7 @@ def main():
         if getattr(ui, "on_runtime_stop", None):
             ui.on_runtime_stop()
         worker.join(timeout=5)
-        _llm_boot.stop_managed_server()
+        _llm_boot.providers.close()
 
 if __name__ == "__main__":
     main()

@@ -3,7 +3,7 @@ Mark decision brain.
 
 For a multi-step goal ("install VS Code, then open it and tell Rahul on WhatsApp")
 this runs a plan -> act -> VERIFY -> re-plan loop using the configured provider (core/llm.py,
-Ollama by default) using the same tools Mark has.
+Groq by default) using the same tools Mark has.
 
 The verify step is enforced here in code (core/verify.py), not left to the model:
 every world-changing tool call is independently checked (file exists / window open /
@@ -81,7 +81,7 @@ def run_goal(goal: str, api_key: str = "", declarations: list[dict] | None = Non
     if workflow:
         log("[plugin router] " + workflow)
     system = SYSTEM + (f"\n\n{workflow}" if workflow else "") + (f"\n\nCONTEXT:\n{context}" if context else "")
-    messages: list[dict] = [{**item, "_local_only": True} for item in (history or [])] + [{"role": "user", "content": f"GOAL: {goal}"}]
+    messages: list[dict] = [{**item, "_local_only": item.get("_local_only", True)} for item in (history or [])] + [{"role": "user", "content": f"GOAL: {goal}"}]
     trace: list[str] = []
     recoveries: list[str] = []
     checkpoints: list[str] = []
@@ -140,7 +140,7 @@ def run_goal(goal: str, api_key: str = "", declarations: list[dict] | None = Non
                 try:
                     args = json.loads(args)
                 except ValueError:
-                    args = {}
+                    return "RESULT: FAILED\nNOT DONE: invalid tool argument JSON."
             if not isinstance(args, dict):
                 return "RESULT: FAILED\nNOT DONE: invalid tool argument object."
             args = dict(args)
@@ -193,7 +193,7 @@ def run_goal(goal: str, api_key: str = "", declarations: list[dict] | None = Non
                     log(f"[brain {step}] checkpoint -> {r[:110]}")
                 except Exception as e:
                     checkpoints.append(f"{name}: checkpoint failed ({type(e).__name__}: {e})")
-            messages.append({"role": "tool", "tool_name": name, "content": out[:2400]})
+            messages.append({"role": "tool", "tool_name": name, "tool_call_id": tc.get("id"), "content": out[:2400]})
 
     return ("RESULT: PARTIAL\nDONE: " + "; ".join(t for t in trace if "[DONE]" in t)[:600] +
             f"\nNOT DONE: stopped after {max_steps} steps without finishing the goal. Steps: " + " | ".join(trace[-6:]) +

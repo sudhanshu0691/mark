@@ -5,13 +5,14 @@ from __future__ import annotations
 
 from typing import Dict, Any, Optional, List
 import logging
+import asyncio
 
-from core.inference.base import InferenceProvider, get_provider_registry
 from core.intelligence.intent import (
     classify_intent,
     assess_complexity,
     Intent,
     Complexity,
+    model_role,
 )
 from core.intelligence.complexity import ComplexityAnalyzer
 from core.llm import load_config
@@ -29,9 +30,10 @@ class InferenceManager:
         """
         self.model_router = available_models or {}
         self.complexity_analyzer = ComplexityAnalyzer()
-        self.provider_registry = get_provider_registry()
         self._routing_history: list = []
         self._max_history = 50
+        self._completed = 0
+        self._failed = 0
 
     async def process_query(
         self,
@@ -39,6 +41,7 @@ class InferenceManager:
         conversation_history: Optional[List[dict]] = None,
         force_model: Optional[str] = None,
         force_intent: Optional[Intent] = None,
+        tools: Optional[List[dict]] = None,
     ) -> dict:
         """
         Process a user query through the adaptive intelligence engine.
@@ -56,17 +59,16 @@ class InferenceManager:
 
         # Step 3: Record routing decision
         routing_decision = {
-            "user_query": user_query,
+            "query_length": len(user_query),
             "intent": intent.value,
             "complexity": complexity.value,
             "model": model,
             "reasoning_depth": "standard",
-            "extraction": extraction,
         }
         self._record_routing(routing_decision)
 
         # Step 4: Get appropriate provider
-        provider = self._get_provider(model or "ollama")
+        from core.llm import chat_raw
 
         # Step 5: Prepare messages
         messages = self._prepare_messages(
@@ -77,19 +79,21 @@ class InferenceManager:
         )
 
         # Step 6: Execute inference
-        tools = None  # Will be passed by caller
 
         try:
-            response = await provider.chat(
-                messages,
+            response = await asyncio.to_thread(
+                chat_raw, messages, role=model,
                 tools=tools,
                 temperature=None,
                 max_tokens=None,
             )
 
+            if not response.get("content") and not response.get("tool_calls"):
+                raise ValueError("Empty inference result")
             result = {
+                "status": "completed",
                 "response": response.get("content", ""),
-                "model": model or "ollama",
+                "model": model or "text",
                 "intent": intent,
                 "complexity": complexity,
                 "tool_calls": response.get("tool_calls", []),
@@ -100,14 +104,16 @@ class InferenceManager:
             self._record_result(result)
             return result
         except Exception as e:
-            logging.error("Inference error: %s: %s", type(e).__name__, e)
+            self._failed += 1
+            logging.error("Inference error: %s", type(e).__name__)
             return {
-                "response": f"I encountered an error: {str(e)}",
-                "model": model or "ollama",
+                "status": "failed",
+                "response": f"Inference failed ({type(e).__name__}).",
+                "model": model or "text",
                 "intent": intent,
                 "complexity": complexity,
                 "auto_routed": False,
-                "error": str(e),
+                "error": type(e).__name__,
             }
 
     def _select_model(self, intent: Intent, complexity: Complexity) -> str:
@@ -116,31 +122,7 @@ class InferenceManager:
         if model:
             return model
         
-        # Default model selection
-        if intent == Intent.CONVERSATION and complexity == Complexity.LOW:
-            return "fast"
-        elif intent == Intent.CODE:
-            return "code"
-        elif intent == Intent.VISION:
-            return "vision"
-        elif complexity == Complexity.DEEP:
-            return "large"
-        elif complexity == Complexity.HIGH:
-            return "medium"
-        else:
-            return "text"
-
-    def _get_provider(self, model_name: str) -> InferenceProvider:
-        """Get the appropriate inference provider for a model."""
-        provider = self.provider_registry.get(model_name)
-        if provider:
-            return provider
-
-        from core.inference.ollama import OllamaProvider
-        cfg = load_config()
-        provider = OllamaProvider(cfg)
-        self.provider_registry.register("ollama", provider)
-        return provider
+        return model_role(intent, complexity)
 
     def _prepare_messages(
         self,
@@ -158,7 +140,7 @@ class InferenceManager:
 
         for msg in history[-10:]:
             if isinstance(msg, dict) and "role" in msg and "content" in msg:
-                messages.append(msg)
+                messages.append({**msg, "_local_only": msg.get("_local_only", not load_config().get("share_history_with_cloud", False))})
 
         messages.append({"role": "user", "content": user_query})
 
@@ -179,8 +161,9 @@ class InferenceManager:
             self._routing_history = self._routing_history[-self._max_history:]
 
     def _record_result(self, result: dict) -> None:
-        """Record inference result for telemetry."""
-        pass
+        """Record aggregate inference outcome without retaining user data."""
+        if result.get("status") == "completed":
+            self._completed += 1
 
     def get_routing_history(self) -> list:
         """Get routing decision history."""
@@ -190,4 +173,6 @@ class InferenceManager:
         """Get inference statistics."""
         return {
             "total_routes": len(self._routing_history),
+            "completed": self._completed,
+            "failed": self._failed,
         }

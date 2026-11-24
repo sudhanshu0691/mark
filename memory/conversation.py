@@ -223,3 +223,52 @@ def recent_messages(channel=None, budget=4800, conversation_id=None) -> list[dic
         messages.append([{"role": "user", "content": user}, {"role": "assistant", "content": reply}])
         budget -= size
     return [message for pair in reversed(messages) for message in pair]
+
+
+def build_turn_context(query, *, conversation_id=None, share_cloud=False):
+    """Return bounded, conversation-scoped context only with explicit sharing enabled."""
+    if not share_cloud:
+        return [], ""
+    from memory import db
+    from memory.memory_manager import load_memory, format_memory_for_prompt
+    from core.cloud_privacy import redact_text
+    history = recent_messages(conversation_id=conversation_id)
+    seen = {(m["role"], m["content"]) for m in history}
+    snippets = []
+    for turn in db.search_conversation_turns(query, conversation_id=conversation_id, limit=4):
+        if ("user", turn["user"][:800]) not in seen:
+            snippets.append({"user": turn["user"][:400], "assistant": turn["assistant"][:500]})
+    facts = format_memory_for_prompt(load_memory())[:1500]
+    context = json.dumps({"stored_facts": facts, "relevant_earlier_turns": snippets}, ensure_ascii=False)
+    return history, redact_text(context[:4000])
+
+
+def recall_local(query: str, *, conversation_id=None):
+    """Explicit conversation-history requests are answered locally, never via an LLM."""
+    import re
+    from memory import db
+    query = query.strip()
+    normalized = query.casefold().rstrip("?.!").strip()
+    recent = {"what did i say last", "what did i say", "what was my last message",
+              "what did we talk about", "what did we discuss last",
+              "show previous conversation", "show last conversation",
+              "maine last kya kaha", "maine kya kaha tha", "pichli baat batao",
+              "pichli conversation batao", "last conversation batao"}
+    match = re.fullmatch(r"(?:search (?:my )?(?:conversation|chat) history for|recall conversation about|history search|purani chat mein dhundo)\s*[: ]\s*(.+)", query, re.I)
+    if normalized not in recent and match is None:
+        return None
+    if conversation_id is None:
+        active = db.get_active_conversation()
+        conversation_id = active["id"] if active else None
+    if conversation_id is None:
+        return "No saved conversation is available."
+    if match:
+        rows = db.search_conversation_turns(match.group(1), conversation_id=conversation_id, limit=3)
+    else:
+        rows = list(reversed(db.load_conversation_turns(3, conversation_id=conversation_id)))
+    # Do not present previous recall output recursively.
+    rows = [r for r in rows if not r["assistant"].startswith("[LOCAL MEMORY]")]
+    if not rows:
+        return "[LOCAL MEMORY] No matching saved conversation turns."
+    return "[LOCAL MEMORY] Saved conversation:\n" + "\n\n".join(
+        "You: " + r["user"][:400] + "\nMARK: " + r["assistant"][:600] for r in rows)

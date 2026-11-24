@@ -1,8 +1,7 @@
 """
 core/llm.py - the ONE place Mark talks to a language model.
 
-Default routing: local Ollama for text and tools.
-Gemini remains an explicit alternative backend for text and live voice.
+Default routing: Groq for text and tools, Gemini for vision and cloud fallback.
 
 Every file that used to call google.genai now calls this module instead, through a
 drop-in client that looks like the old one:
@@ -56,10 +55,12 @@ CONFIG_PATH = BASE_DIR / "config" / "llm.json"
 
 DEFAULTS: dict[str, Any] = {
     "profile": "balanced",
-    "backend": "ollama",
-    "host": "http://127.0.0.1:11434",
-    "text_model": "qwen3:4b", "code_model": "qwen3:4b",
-    "fast_model": "qwen3:4b", "vision_model": "qwen2.5vl:3b",
+    "backend": "multi_provider",
+    "text_model": "qwen/qwen3.8-27b", "code_model": "openai/gpt-oss-120b",
+    "fast_model": "qwen/qwen3.8-27b", "vision_model": "gemini-3.1-flash-lite",
+    "primary_provider": "groq", "fallback_providers": ["gemini"],
+    "free_tier_only": True, "verified_free_models": [],
+    "share_history_with_cloud": False,
     "num_ctx": 4096, "timeout_s": 60, "keep_alive": "30m",
     "web_results": 6,
     "gemini": {"text_model": "gemini-flash-lite-latest", "live_model": "gemini-2.5-flash-native-audio-latest",
@@ -67,7 +68,7 @@ DEFAULTS: dict[str, Any] = {
                "max_retries": 2, "retry_backoff_s": [2, 5], "health_cache_s": 30},
 }
 
-_ENV = {"backend": "MARK_LLM_BACKEND", "host": "OLLAMA_HOST", "text_model": "MARK_TEXT_MODEL", "code_model": "MARK_CODE_MODEL", "fast_model": "MARK_FAST_MODEL", "vision_model": "MARK_VISION_MODEL"}
+_ENV = {"backend": "MARK_LLM_BACKEND", "text_model": "MARK_TEXT_MODEL", "code_model": "MARK_CODE_MODEL", "fast_model": "MARK_FAST_MODEL", "vision_model": "MARK_VISION_MODEL"}
 
 
 from core import providers
@@ -113,7 +114,7 @@ def _provider_request(provider: str):
 
 
 def _run_provider(provider: str, function, *args):
-    if provider == "gemini" and load_config().get("profile") == "offline":
+    if load_config().get("profile") == "offline":
         raise LLMUnavailable("Cloud LLM requests are disabled in offline profile.")
     with _provider_request(provider):
         return function(*args)
@@ -142,13 +143,11 @@ def load_config(refresh: bool = False) -> dict[str, Any]:
         for key, env in _ENV.items():
             if os.environ.get(env):
                 cfg[key] = os.environ[env]
-        host = str(cfg["host"]).strip()
-        cfg["host"] = (host if host.startswith("http") else "http://" + host).rstrip("/")
+        if isinstance(cfg.get("providers", {}).get("gemini"), dict):
+            cfg["gemini"].update(cfg["providers"]["gemini"])
         cfg["profile"] = os.getenv("MARK_PROFILE", cfg.get("profile", "balanced")).strip().lower()
-        if cfg["profile"] == "offline":
-            cfg["backend"] = "ollama"
-        if cfg.get("backend") not in {"ollama", "gemini", "multi_provider"}:
-            raise LLMUnavailable("Unsupported LLM backend. Choose ollama or gemini.")
+        if cfg.get("backend") not in {"gemini", "multi_provider"}:
+            raise LLMUnavailable("Unsupported LLM backend. Choose multi_provider or gemini.")
         _cfg_cache = cfg
         return cfg
 
@@ -211,7 +210,9 @@ def role_for(model: str | None, has_images: bool = False) -> str:
 
 def model_for(role: str, cfg: dict | None = None) -> str:
     cfg = cfg or load_config()
-    return cfg.get(f"{role}_model") or cfg["text_model"]
+    provider = "gemini" if role == "vision" or cfg.get("backend") == "gemini" else cfg.get("primary_provider", "groq")
+    models = cfg.get("gemini", {}) if provider == "gemini" else cfg.get("providers", {}).get(provider, {})
+    return models.get(f"{role}_model") or models.get("text_model") or cfg.get(f"{role}_model") or cfg["text_model"]
 
 
 def _png_bytes(img: Any) -> bytes:
@@ -321,45 +322,6 @@ class InferenceProvider:
         return await self.generate(messages, **kwargs)
 
 
-# ── Ollama Provider ─────────────────────────────────────────────────────────
-
-class OllamaProvider(InferenceProvider):
-    def __init__(self, cfg: dict | None = None):
-        super().__init__(cfg)
-        self.host = self._ensure_host(cfg.get("host", "http://127.0.0.1:11434")) if cfg else "http://127.0.0.1:11434"
-        self.models: list = []
-        self._loaded_models: set = set()
-
-    def _ensure_host(self, host: str) -> str:
-        host = str(host).strip()
-        return (host if host.startswith("http") else "http://" + host).rstrip("/")
-    
-    def get_model_for_role(self, role: str) -> str:
-        cfg = load_config()
-        return cfg.get(f"{role}_model") or cfg["text_model"]
-    
-    def get_capabilities(self) -> dict[str, bool]:
-        return {"supports_tools": True, "supports_vision": True,
-                "supports_streaming": True, "supports_json": True}
-    
-    def health_check(self) -> dict:
-        return health()
-    
-    async def generate(self, messages: list[dict], **kwargs: Any) -> dict:
-        role = kwargs.get("role", "text")
-        result = await asyncio.to_thread(
-            chat_raw,
-            messages,
-            role,
-            kwargs.get("tools"),
-            kwargs.get("temperature"),
-            kwargs.get("max_tokens"),
-            kwargs.get("model"),
-            kwargs.get("json_mode", False),
-        )
-        return result
-
-
 class GeminiProvider(InferenceProvider):
     def __init__(self, cfg: dict | None = None):
         super().__init__(cfg)
@@ -412,146 +374,70 @@ def web_context(query: str, n: int | None = None) -> str:
     return "\n".join(lines)
 
 
-_managed_process = None
-_start_lock = threading.Lock()
-
-
-def _ensure_server():
-    """Start a local server only when a local request needs it."""
-    global _managed_process
-    cfg = load_config()
-    host = cfg["host"]
-    def reachable():
-        try:
-            with urllib.request.urlopen(host + "/api/tags", timeout=0.5) as response:
-                return response.status == 200
-        except Exception:
-            return False
-    if reachable():
-        return
-    with _start_lock:
-        if reachable():
-            return
-        hostname = urlsplit(host).hostname or ""
-        try:
-            local = hostname.lower() == "localhost" or ipaddress.ip_address(hostname).is_loopback
-        except ValueError:
-            local = False
-        if not local:
-            return
-        executable = shutil.which("ollama")
-        if not executable:
-            candidate = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "ollama.exe"
-            executable = str(candidate) if candidate.is_file() else None
-        if not executable:
-            return
-        if _managed_process is None or _managed_process.poll() is not None:
-            kwargs = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
-                      "stderr": subprocess.DEVNULL, "env": {**os.environ, "OLLAMA_HOST": host}}
-            if os.name == "nt":
-                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-            try:
-                _managed_process = subprocess.Popen([executable, "serve"], **kwargs)
-            except OSError:
-                return
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            if reachable() or _managed_process.poll() is not None:
-                break
-            time.sleep(0.25)
-
-
-def stop_managed_server():
-    global _managed_process
-    with _start_lock:
-        process, _managed_process = _managed_process, None
-    if process is not None and process.poll() is None:
-        try:
-            process.terminate()
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
-
-
-# --------------------------------------------------------------------------- Ollama transport
-def _post(path: str, payload: dict, timeout: float | None = None) -> dict:
-    import requests
-    import time
-    cfg = load_config()
-    last_exc = None
-    # Fail quickly when Ollama is down; repeating a long inference timeout three
-    # times made a single user request appear frozen for many minutes.
-    attempts = 2 if timeout is None else 1
-    for attempt in range(attempts):
-        try:
-            r = requests.post(cfg["host"] + path, json=payload, timeout=timeout or cfg["timeout_s"])
-            last_exc = None
-            break
-        except requests.exceptions.ConnectionError as e:
-            last_exc = LLMUnavailable(
-                f"Ollama is not running at {cfg['host']}. Start it (open the Ollama app, or run `ollama serve`). "
-                f"Detail: {e.__class__.__name__}")
-            # connection errors are not transient usually; but retry once
-            if attempt + 1 < attempts:
-                time.sleep(1.0)
-                continue
-            raise last_exc from e
-        except requests.exceptions.Timeout as e:
-            last_exc = LLMUnavailable(f"Ollama took longer than {cfg['timeout_s']}s - model too big for this PC? Try a smaller one in config/llm.json.")
-            raise last_exc from e
-    if last_exc is not None:
-        raise last_exc
-    if r.status_code == 404 and "not found" in r.text.lower():
-        model = payload.get("model", "?")
-        raise LLMUnavailable(f"Model '{model}' is not installed. Run:  ollama pull {model}")
-    if r.status_code >= 400:
-        kind = "recoverable provider error" if r.status_code >= 500 else "request error"
-        raise LLMUnavailable(f"Ollama {kind} {r.status_code}.")
-    try:
-        return r.json()
-    except ValueError as exc:
-        raise LLMUnavailable("Ollama returned a malformed JSON response.") from exc
-
-
 def chat_raw(messages: list[dict], role: str = "text", tools: list[dict] | None = None,
              temperature: float | None = None, max_tokens: int | None = None,
-             model: str | None = None, json_mode: bool = False) -> dict:
-    """Send one chat request to the configured provider."""
+             model: str | None = None, json_mode: bool = False, *, on_delta=None, cancelled=None, provider_override=None) -> dict:
+    """Send one chat request; optional text deltas use the same provider routing."""
     cfg = load_config()
-    local_messages = [{k: v for k, v in msg.items() if k != "_local_only"} for msg in messages]
-    if cfg.get("backend") == "multi_provider":
-        # Free-tier eligibility is account-specific; never assume that a model is free.
-        if cfg.get("free_tier_only", True) and not cfg.get("verified_free_models"):
-            if not cfg.get("automatic_fallback", True):
-                raise LLMUnavailable("Cloud model free-tier eligibility is not verified.")
-            return _run_provider("ollama", _ollama_chat, local_messages, role, tools, temperature, max_tokens, model, json_mode)
-        cloud_messages = [clean for clean, original in zip(local_messages, messages) if not original.get("_local_only")]
-        if not cfg.get("share_history_with_cloud", False):
-            last_user = next ( (i for i in range(len(cloud_messages)-1, -1, -1) if cloud_messages[i].get("role") == "user"), -1)
-            cloud_messages = [m for m in cloud_messages[:last_user] if m.get("role") == "system"] + cloud_messages[last_user:] if last_user >= 0 else []
+    if cfg.get("profile") == "offline":
+        raise LLMUnavailable("Cloud inference is disabled in offline profile.")
+    cloud_messages = [{k: v for k, v in msg.items() if k != "_local_only"}
+                      for msg in messages if not msg.get("_local_only")]
+    # Keep the current tool exchange intact, but exclude prior dialogue by default.
+    if not cfg.get("share_history_with_cloud", False):
+        last_user = next((i for i in range(len(cloud_messages)-1, -1, -1)
+                          if cloud_messages[i].get("role") == "user"), -1)
+        if last_user >= 0:
+            cloud_messages = [m for m in cloud_messages[:last_user] if m.get("role") == "system"] + cloud_messages[last_user:]
+    from core.cloud_privacy import redact_messages
+    cloud_messages = redact_messages(cloud_messages, cfg)
+    if role == "vision" and not cfg.get("allow_cloud_vision", False):
+        raise LLMUnavailable("Cloud vision is not authorized.")
+    if provider_override is not None and provider_override not in {"groq", "gemini"}:
+        raise LLMUnavailable("Unsupported cloud provider.")
+    if role == "vision" and provider_override not in (None, "gemini"):
+        raise LLMUnavailable("Vision requires the configured Gemini provider.")
+    if provider_override is not None:
+        order = [provider_override]
+    elif cfg.get("backend") == "gemini" or role == "vision":
+        order = ["gemini"]
+    else:
+        primary = cfg.get("primary_provider", "groq")
+        order = [primary]
+        if cfg.get("automatic_fallback", True):
+            order += cfg.get("fallback_providers", ["gemini"])
+    failures = []
+    emitted = False
+    def emit(delta):
+        nonlocal emitted
+        emitted = True
+        on_delta(delta)
+    for provider in dict.fromkeys(order):
+        if cancelled and cancelled():
+            raise LLMUnavailable("Inference cancelled.")
+        if provider not in {"groq", "gemini"}:
+            continue
+        if provider == "groq" and role == "vision":
+            continue
+        if provider == "groq" and any(m.get("_gemini_content") is not None for m in cloud_messages):
+            continue
         try:
-            if role == "vision":
-                if not cfg.get("allow_cloud_vision", False):
-                    raise LLMUnavailable("Cloud vision is not authorized.")
-                vision_model = cfg.get("gemini", {}).get("vision_model")
-                if cfg.get("free_tier_only", True) and vision_model not in cfg.get("verified_free_models", []):
-                    raise LLMUnavailable("Gemini model free-tier eligibility is not verified.")
+            if provider == "gemini":
+                name = cfg.get("gemini", {}).get("vision_model" if role == "vision" else "text_model")
+                if cfg.get("free_tier_only", True) and name not in cfg.get("verified_free_models", []):
+                    raise LLMUnavailable("Gemini model is not on the configured allowlist.")
                 return _run_provider("gemini", _gemini_chat, cloud_messages, role, tools, temperature, max_tokens, json_mode)
+            if on_delta is not None and not tools and not json_mode:
+                return _run_provider("groq", _groq_chat, cloud_messages, role, tools, temperature, max_tokens, json_mode, emit, cancelled)
             return _run_provider("groq", _groq_chat, cloud_messages, role, tools, temperature, max_tokens, json_mode)
-        except (LLMUnavailable, providers.BudgetExceeded):
-            if not cfg.get("automatic_fallback", True):
+        except (LLMUnavailable, providers.BudgetExceeded) as exc:
+            if emitted or (cancelled and cancelled()):
                 raise
-            return _run_provider("ollama", _ollama_chat, local_messages, role, tools, temperature, max_tokens, model, json_mode)
-    if cfg.get("backend") == "gemini":
-        cloud_messages = [clean for clean, original in zip(local_messages, messages) if not original.get("_local_only")]
-        return _run_provider("gemini", _gemini_chat, cloud_messages, role, tools, temperature, max_tokens, json_mode)
-    if cfg.get("backend") == "ollama":
-        return _run_provider("ollama", _ollama_chat, local_messages, role, tools, temperature, max_tokens, model, json_mode)
-    raise LLMUnavailable("Unsupported LLM backend. Choose ollama or gemini.")
+            failures.append(f"{provider}: {exc}")
+    raise LLMUnavailable("Cloud inference unavailable: " + "; ".join(failures))
 
 
-def _groq_chat(messages, role, tools, temperature, max_tokens, json_mode):
+def _groq_chat(messages, role, tools, temperature, max_tokens, json_mode, on_delta=None, cancelled=None):
     from core.secrets import get_secret
     cfg = load_config()
     models = cfg.get("providers", {}).get("groq", {})
@@ -566,7 +452,22 @@ def _groq_chat(messages, role, tools, temperature, max_tokens, json_mode):
         if providers.initialize("groq", cfg) != "CONFIGURED":
             raise LLMUnavailable("Groq client is unavailable.")
         client = providers.client_for("groq", key)
-    payload = {"model": name, "messages": messages, "max_completion_tokens": max_tokens or 512}
+    wire_messages = []
+    for msg in messages:
+        item = {"role": msg["role"], "content": msg.get("content", "")}
+        if msg.get("tool_calls"):
+            item["tool_calls"] = []
+            for call in msg["tool_calls"]:
+                fn = call["function"]
+                args = fn.get("arguments", {})
+                item["tool_calls"].append({"id": call["id"], "type": "function",
+                    "function": {"name": fn["name"], "arguments": args if isinstance(args, str) else json.dumps(args)}})
+        if msg["role"] == "tool":
+            if not msg.get("tool_call_id"):
+                raise LLMUnavailable("Missing cloud tool call ID.")
+            item["tool_call_id"] = msg["tool_call_id"]
+        wire_messages.append(item)
+    payload = {"model": name, "messages": wire_messages, "max_completion_tokens": max_tokens or 512}
     if temperature is not None:
         payload["temperature"] = temperature
     if tools:
@@ -578,6 +479,32 @@ def _groq_chat(messages, role, tools, temperature, max_tokens, json_mode):
     start = time.monotonic()
     try:
         with providers.cloud_request("groq", cfg):
+            if on_delta is not None:
+                chunks = []
+                first_ms = None
+                tokens = 0
+                stream = client.chat.completions.create(**payload, stream=True)
+                try:
+                    for event in stream:
+                        if cancelled and cancelled():
+                            raise LLMUnavailable("Inference cancelled.")
+                        usage = getattr(event, "usage", None)
+                        if usage:
+                            tokens = getattr(usage, "total_tokens", 0) or tokens
+                        choices = getattr(event, "choices", [])
+                        delta = getattr(choices[0].delta, "content", None) if choices else None
+                        if delta:
+                            if first_ms is None:
+                                first_ms = round((time.monotonic()-start)*1000)
+                            chunks.append(delta)
+                            on_delta(delta)
+                finally:
+                    stream.close()
+                content = _clean("".join(chunks))
+                if not content:
+                    raise LLMUnavailable("Groq returned an empty stream.")
+                providers.record("groq", name, start, tokens=tokens, first_ms=first_ms)
+                return {"role": "assistant", "content": content}
             response = client.chat.completions.create(**payload)
         message = response.choices[0].message
         providers.record("groq", name, start, tokens=getattr(response.usage, "total_tokens", 0))
@@ -585,7 +512,7 @@ def _groq_chat(messages, role, tools, temperature, max_tokens, json_mode):
         if message.tool_calls:
             result["tool_calls"] = [call.model_dump(exclude_none=True) for call in message.tool_calls]
         return result
-    except providers.BudgetExceeded:
+    except (LLMUnavailable, providers.BudgetExceeded):
         raise
     except Exception as exc:
         status = getattr(exc, "status_code", 0) or 0
@@ -616,39 +543,6 @@ def local_tool_selection(messages, tools, byte_budget):
             selected.append(tool)
             byte_budget -= cost
     return selected
-
-
-def _ollama_chat(messages: list[dict], role: str, tools: list[dict] | None,
-                 temperature: float | None, max_tokens: int | None,
-                 model: str | None, json_mode: bool) -> dict:
-    cfg = load_config()
-    _ensure_server()
-    payload: dict[str, Any] = {
-        "model": model or model_for(role, cfg),
-        "messages": messages,
-        "stream": False,
-        "keep_alive": cfg.get("keep_alive", "30m"),
-        "options": {"num_ctx": int(cfg.get("num_ctx", 8192))},
-    }
-    if temperature is not None:
-        payload["options"]["temperature"] = float(temperature)
-    payload["options"]["num_predict"] = int(max_tokens or cfg.get("local_max_output_tokens", 384))
-    if tools:
-        payload["tools"] = local_tool_selection(messages, tools, int(cfg.get("local_tool_schema_bytes", 5200)))
-    if json_mode:
-        payload["format"] = "json"
-    payload["think"] = False                         # fast answers; reasoning models otherwise ramble
-    try:
-        data = _post("/api/chat", payload)
-    except LLMUnavailable as e:
-        if "think" in str(e).lower():                # model does not know the flag
-            payload.pop("think", None)
-            data = _post("/api/chat", payload)
-        else:
-            raise
-    if not isinstance(data, dict) or not isinstance(data.get("message"), dict):
-        raise LLMUnavailable("Ollama returned a malformed chat response.")
-    return data["message"]
 
 
 def generate(prompt: Any, role: str = "text", system: str | None = None,
@@ -733,7 +627,7 @@ class _Models:
         text, images = _normalise(contents)
         role = role_for(model, bool(images))
         cfg = load_config()
-        primary = cfg.get("backend", "ollama")
+        primary = cfg.get("backend", "multi_provider")
         if primary == "gemini":
             return _run_provider("gemini", _gemini_generate, role, contents, config)
         return _generate_content_adapter(role, contents, config)
@@ -751,65 +645,13 @@ def make_client(*_: Any, **__: Any) -> Client:
 
 
 # --------------------------------------------------------------------------- health + install help
-def missing_models(cfg: dict, installed: list[dict]) -> list[str]:
-    def tag(name):
-        return name if ":" in name.rsplit("/", 1)[-1] else name + ":latest"
-    available = {tag(m["name"]) for m in installed if m.get("name")}
-    return sorted({tag(model_for(role, cfg)) for role in ("text", "code", "fast", "vision")} - available)
-
-
 def health() -> dict:
     cfg = load_config()
-    if cfg["backend"] == "gemini":
-        from core.secrets import get_secret
-        ok = bool(get_secret("gemini") and cfg.get("gemini", {}).get("text_model"))
-        return {"ok": ok, "backend": "gemini", "missing": [], "message": "Gemini configured." if ok else "Gemini requires a credential and model."}
-    import requests
-    try:
-        response = requests.get(cfg["host"] + "/api/tags", timeout=4)
-        response.raise_for_status()
-        missing = missing_models(cfg, response.json().get("models", []))
-    except (requests.RequestException, ValueError):
-        return {"ok": False, "backend": "ollama", "missing": [], "message": "Ollama is not running."}
-    return {"ok": not missing, "backend": "ollama", "missing": missing,
-            "message": "ready" if not missing else "missing models: " + ", ".join(missing)}
-
-
-def pull_missing(progress: Callable[[str], None] = print) -> list[str]:
-    """Download any configured model that is not installed. Returns the ones that failed."""
-    import requests
-    cfg = load_config()
-    failed_models: list[str] = []
-    try:
-        response = requests.get(cfg["host"] + "/api/tags", timeout=5)
-        response.raise_for_status()
-        missing = missing_models(cfg, response.json()["models"])
-    except (requests.RequestException, ValueError, KeyError) as exc:
-        progress(f"Ollama inventory unavailable: {type(exc).__name__}")
-        return ["Ollama inventory unavailable"]
-    for m in missing:
-        progress(f"Downloading {m} ...")
-        try:
-            with requests.post(cfg["host"] + "/api/pull", json={"model": m, "stream": True},
-                               stream=True, timeout=(5, 120)) as r:
-                r.raise_for_status()
-                last = ""
-                for line in r.iter_lines():
-                    if not line:
-                        continue
-                    event = json.loads(line)
-                    if event.get("error"):
-                        raise LLMUnavailable(str(event["error"]))
-                    st = event.get("status", "")
-                    if st != last:
-                        progress(f"  {m}: {st}")
-                        last = st
-                if last != "success":
-                    raise LLMUnavailable("Download ended before success")
-        except Exception as e:
-            progress(f"  could not pull {m}: {e}")
-            failed_models.append(m)
-    return failed_models
+    from core.secrets import get_secret
+    names = ["gemini"] if cfg["backend"] == "gemini" else ["groq", "gemini"]
+    configured = [name for name in names if get_secret(name)]
+    return {"ok": bool(configured), "backend": cfg["backend"], "missing": [],
+            "message": "Credentials configured: " + ", ".join(configured) if configured else "Cloud credentials required."}
 
 
 # --------------------------------------------------------------------------- optional Gemini backend
@@ -829,10 +671,10 @@ def _gemini_chat(messages, role, tools, temperature, max_tokens, json_mode):
         if msg.get("images"):
             parts.extend(gt.Part.from_bytes(data=base64.b64decode(image), mime_type="image/png") for image in msg["images"])
         if msg["role"] == "tool":
-            parts = [gt.Part.from_function_response(name=msg["tool_name"], response={"result": text})]
+            parts = [gt.Part.from_function_response(name=msg.get("tool_name") or msg.get("name") or "tool", response={"result": text})]
         for call in msg.get("tool_calls") or []:
             fn = call["function"]
-            parts.append(gt.Part.from_function_call(name=fn["name"], args=fn.get("arguments") or {}))
+            parts.append(gt.Part.from_function_call(name=fn["name"], args=json.loads(fn["arguments"]) if isinstance(fn.get("arguments"), str) else (fn.get("arguments") or {})))
         contents.append(gt.Content(role="model" if msg["role"] == "assistant" else "user", parts=parts))
     config = {"system_instruction": "\n".join(instructions), "temperature": temperature,
               "max_output_tokens": max_tokens}
@@ -873,6 +715,10 @@ def _gemini_generate(role: str, contents: Any, config: Any, *, native=False):
     name = cfg.get("gemini", {}).get("vision_model" if role == "vision" else "text_model", "")
     if not name:
         raise LLMUnavailable("Gemini text model is not configured.")
+    if cfg.get("free_tier_only", True) and name not in cfg.get("verified_free_models", []):
+        raise LLMUnavailable("Gemini model is not on the configured allowlist.")
+    if role == "vision" and not cfg.get("allow_cloud_vision", False):
+        raise LLMUnavailable("Cloud vision is not authorized.")
     retries = max(0, min(int(cfg.get("gemini", {}).get("max_retries", 2)), 5))
     backoffs = cfg.get("gemini", {}).get("retry_backoff_s", [2, 5])
     timeout_ms = int(max(1, float(cfg.get("gemini", {}).get("timeout_s", 60))) * 1000)
@@ -983,12 +829,9 @@ def _gemini_generate_model(model: str, prompt: str, cfg: dict):
     return response
 
 
-if __name__ == "__main__":                       # python -m core.llm [check|pull]
+if __name__ == "__main__":                       # python -m core.llm [check]
     import sys
     cmd = sys.argv[1] if len(sys.argv) > 1 else "check"
     h = health()
     print(f"backend: {h['backend']}  ->  {h['message']}")
-    if cmd == "pull" and load_config().get("backend") == "ollama":
-        failed = pull_missing()
-        sys.exit(1 if failed else 0)
     sys.exit(0 if h["ok"] else 1)

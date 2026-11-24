@@ -57,9 +57,9 @@ def test_gemini_live_and_text_status_are_independent():
     app = QApplication.instance() or QApplication([])
     window = MarkUI()
     try:
-        window.set_llm_provider('ollama')
+        window.set_llm_provider('groq')
         window.set_gemini_live_state('READY')
-        assert window._llm_labels['ollama'].text() == 'OLLAMA TEXT - WORKING'
+        assert window._llm_labels['groq'].text() == 'GROQ TEXT - WORKING'
         assert window._llm_labels['gemini'].text() == 'GEMINI TEXT - IDLE'
         assert window.gemini_live_label.text() == 'GEMINI LIVE - CONNECTED'
         window.set_llm_provider('sleep')

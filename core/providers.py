@@ -27,6 +27,9 @@ class BudgetExceeded(RuntimeError):
 
 @contextmanager
 def task_budget():
+    if _task_usage.get() is not None:
+        yield
+        return
     token = _task_usage.set({})
     try:
         yield
@@ -40,9 +43,9 @@ def reserve(name, cfg):
     per_task = int(limits.get("requests_per_task", 0))
     daily = int(limits.get("requests_per_day", 0))
     usage = _task_usage.get()
-    if per_task and usage is not None and usage.get(name, 0) >= per_task:
-        raise BudgetExceeded(f"{name} reached the configured per-task request budget.")
-    if daily:
+    if per_task > 0 and usage is not None and sum(usage.values()) >= per_task:
+        raise BudgetExceeded(f"{name} reached the shared per-task request budget.")
+    if daily > 0:
         day = date.today().isoformat()
         USAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(USAGE_PATH, timeout=5)
@@ -77,6 +80,9 @@ def initialize(name, cfg):
     key = get_secret(name)
     with _lock:
         status = _stats.setdefault(name, {"state": "INITIALIZING", "requests": 0, "tokens": 0})
+        existing = _clients.get(name)
+        if key and existing and existing[0] == key:
+            return "CONFIGURED"
     if not key:
         with _lock:
             status["state"] = "NOT_CONFIGURED"
@@ -132,4 +138,8 @@ def close():
         for item in _stats.values():
             item["state"] = "STOPPED"
     for _, client in clients:
-        client.close()
+        try:
+            client.close()
+        except Exception:
+            # One broken transport must not prevent the others closing.
+            pass

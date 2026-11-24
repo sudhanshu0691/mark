@@ -32,6 +32,7 @@ CATEGORIES = ("identity", "preferences", "projects", "relationships", "wishes", 
 MAX_CONVERSATION_TURNS = 100
 
 FTS_ENABLED = False
+_initialized_db = None
 
 
 def _connect() -> sqlite3.Connection:
@@ -43,7 +44,13 @@ def _connect() -> sqlite3.Connection:
 
 
 def init_db() -> None:
+    global _initialized_db
     with _lock:
+        path = DB_PATH.resolve()
+        if _initialized_db is not None and path.exists():
+            stat = path.stat()
+            if _initialized_db == (path, stat.st_dev, stat.st_ino):
+                return
         conn = _connect()
         try:
             conn.executescript("""
@@ -99,12 +106,22 @@ def init_db() -> None:
             conn.commit()
         finally:
             conn.close()
-    _migrate_if_needed()
+        _migrate_if_needed()
+        # Legacy migration can insert turns without a conversation ID.
+        conn = _connect()
+        try:
+            _ensure_default_conversation(conn)
+            conn.commit()
+        finally:
+            conn.close()
+        stat = path.stat()
+        _initialized_db = (path, stat.st_dev, stat.st_ino)
 
 
 def _ensure_fts(conn: sqlite3.Connection) -> None:
     global FTS_ENABLED
     try:
+        existed = conn.execute("SELECT 1 FROM sqlite_master WHERE name = ?", ("conversation_turns_fts",)).fetchone()
         conn.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS conversation_turns_fts "
             "USING fts5(user, assistant, content='conversation_turns', content_rowid='id')"
@@ -128,7 +145,8 @@ def _ensure_fts(conn: sqlite3.Connection) -> None:
                 VALUES (new.id, new.user, new.assistant);
             END;
         """)
-        conn.execute("INSERT INTO conversation_turns_fts(conversation_turns_fts) VALUES ('rebuild')")
+        if not existed:
+            conn.execute("INSERT INTO conversation_turns_fts(conversation_turns_fts) VALUES ('rebuild')")
         FTS_ENABLED = True
     except sqlite3.OperationalError:
         FTS_ENABLED = False
@@ -174,6 +192,8 @@ def set_active_conversation(conversation_id: int) -> None:
     with _lock:
         conn = _connect()
         try:
+            if not conn.execute("SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)).fetchone():
+                raise ValueError("Unknown conversation ID")
             conn.execute("UPDATE conversations SET is_active = 0")
             conn.execute(
                 "UPDATE conversations SET is_active = 1, updated_at = ? WHERE id = ?",
@@ -523,11 +543,15 @@ def append_conversation_turn(user, assistant, *, channel="voice", conversation_i
     with _lock:
         conn = _connect()
         try:
+            if conversation_id is not None and not conn.execute("SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)).fetchone():
+                raise ValueError("Conversation was deleted or does not exist")
             conn.execute(
                 "INSERT INTO conversation_turns(timestamp,user,assistant,channel,conversation_id) "
                 "VALUES (?,?,?,?,?)",
                 (_dt.datetime.now().isoformat(timespec="seconds"),
                  user.strip(), assistant.strip(), channel, conversation_id))
+            conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?",
+                         (_dt.datetime.now().isoformat(timespec="seconds"), conversation_id))
             conn.commit()
         finally:
             conn.close()
@@ -592,5 +616,43 @@ def clear_conversation_turns():
         try:
             conn.execute("DELETE FROM conversation_turns")
             conn.commit()
+        finally:
+            conn.close()
+
+
+def search_conversation_turns(query: str, *, conversation_id=None, limit=5):
+    """Search only within one conversation, without sending data to a provider."""
+    import re
+    init_db()
+    if conversation_id is None:
+        active = get_active_conversation()
+        conversation_id = active["id"] if active else None
+    terms = list(dict.fromkeys(re.findall(r"\w{3,}", query.casefold())))[:12]
+    if not terms or conversation_id is None:
+        return []
+    limit = max(1, min(int(limit), 20))
+    with _lock:
+        conn = _connect()
+        try:
+            if FTS_ENABLED:
+                expression = " OR ".join('"' + term + '"' for term in terms)
+                try:
+                    rows = conn.execute(
+                        "SELECT t.id,t.timestamp,t.user,t.assistant FROM conversation_turns_fts "
+                        "JOIN conversation_turns t ON t.id=conversation_turns_fts.rowid "
+                        "WHERE conversation_turns_fts MATCH ? AND t.conversation_id=? "
+                        "ORDER BY bm25(conversation_turns_fts),t.id DESC LIMIT ?",
+                        (expression, conversation_id, limit)).fetchall()
+                    return [{"id": i, "timestamp": ts, "user": u, "assistant": a} for i,ts,u,a in rows]
+                except sqlite3.OperationalError:
+                    pass
+            clauses = " OR ".join("(lower(user) LIKE ? OR lower(assistant) LIKE ?)" for _ in terms)
+            params = [conversation_id]
+            for term in terms:
+                params.extend(["%" + term + "%"] * 2)
+            rows = conn.execute(
+                "SELECT id,timestamp,user,assistant FROM conversation_turns WHERE conversation_id=? AND (" +
+                clauses + ") ORDER BY id DESC LIMIT ?", (*params, limit)).fetchall()
+            return [{"id": i, "timestamp": ts, "user": u, "assistant": a} for i,ts,u,a in rows]
         finally:
             conn.close()

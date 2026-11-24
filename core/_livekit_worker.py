@@ -1,276 +1,286 @@
-"""LiveKit Agent Worker for MARK.
-
-Python-based LiveKit Agent Worker using the installed LiveKit Agents SDK.
-
-Manages:
-- Agent session lifecycle
-- Audio input and output
-- Voice activity detection
-- Speech recognition
-- End-of-turn detection
-- Interruption handling
-- Streaming response generation
-- Speech synthesis
-- Session events
-- Resource cleanup
-"""
-
+"""Opt-in LiveKit room transport using MARK's existing secure task runtime."""
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Optional, Tuple
+from core.voice_stream import SentenceBuffer
 
 logger = logging.getLogger(__name__)
 
+
 class LiveKitAgentWorker:
-    """LiveKit Agent Worker for MARK real-time conversational AI.
-
-    This worker uses the livekit-agents SDK to manage the conversational pipeline,
-    connecting the voice pipeline to the MARK core engine through a thin adapter.
-
-    Responsibilities:
-    - Agent session lifecycle management
-    - Audio input/output via WebRTC
-    - VAD-based speech detection and endpointing
-    - Speech-to-text via local Faster Whisper engine
-    - End-of-turn detection
-    - Interruption handling
-    - Streaming LLM response generation via MARK LLM gateway
-    - Local text-to-speech via Piper TTS
-    - WebRTC audio output to client
-    - Text message handling
-    - Session events and resource cleanup
-    """
-
     def __init__(self, markdown_adapter=None, llm_gateway=None, stt_engine=None, tts_engine=None):
         self.markdown_adapter = markdown_adapter
         self.llm_gateway = llm_gateway
         self.stt_engine = stt_engine
         self.tts_engine = tts_engine
-
-        # Session state
-        self._session = None
-        self._loop = None
+        self._room = None
+        self._source = None
         self._is_running = False
         self._is_speaking = False
-        self._interrupted = False
-        self._cancel_requested = False
-        self._active_task_id = None
-        self._local_cancel_event = asyncio.Event()
+        self._turn_lock = asyncio.Lock()
+        self._tasks = set()
+        self._receivers = set()
+        self._track_tasks = {}
+        self._turn_task = None
+        self._pending_text = None
+        self._cancel = asyncio.Event()
 
-        # Pipeline state
-        self._audio_in_queue = None
-        self._out_queue = None
-        self._turn_done_event = None
-
-        # Plugin/agent state
-        self._plugins_changed = asyncio.Event()
-
-        logger.info("LiveKit Agent Worker initialized")
-
-    async def start(self, room, participant) -> None:
-        """Start the LiveKit agent worker for a new room/participant.
-
-        Args:
-            room: LiveKit Room instance
-            participant: LiveKit Participant instance
-        """
-        self._loop = asyncio.get_running_loop()
-        self._session = None
-
-        # Initialize pipelines if not already done
-        if self.stt_engine:
-            await self.stt_engine.load()
-
-        if self.tts_engine:
-            await self.tts_engine.load()
-
+    async def start(self, room, participant=None):
+        from livekit import rtc
+        if not self.markdown_adapter or not self.stt_engine or not self.tts_engine:
+            raise RuntimeError("MARK voice adapters are not configured")
+        if self._room is not None:
+            await self.stop()
+        await self.stt_engine.load()
+        await self.tts_engine.load()
+        self._room = room
+        self._source = rtc.AudioSource(24000, 1)
+        track = rtc.LocalAudioTrack.create_audio_track("mark-speech", self._source)
+        await room.local_participant.publish_track(track)
         self._is_running = True
-        self._interrupted = False
-        self._cancel_requested = False
-        self._active_task_id = None
+        self._cancel.clear()
 
-        logger.info(f"LiveKit Agent Worker started for participant {participant.identity}")
+        @room.on("disconnected")
+        def disconnected(*args):
+            if self._room is not room:
+                return
+            self._is_running = False
+            self._cancel.set()
+            self._pending_text = None
+            for task in tuple(self._receivers):
+                task.cancel()
 
-        # Set up participant event handlers
-        self._setup_participant_events(participant)
+        @room.on("track_subscribed")
+        def subscribed(track, publication, remote):
+            if self._room is not room or not self._is_running:
+                return
+            if track.kind != rtc.TrackKind.KIND_AUDIO:
+                return
+            # Explicitly configured remote identity; never process arbitrary room users.
+            allowed = getattr(self, "allowed_identity", None)
+            if not allowed or remote.identity != allowed:
+                return
+            key = getattr(publication, "sid", None) or id(track)
+            existing = self._track_tasks.get(key)
+            if existing is not None and not existing.done():
+                return
+            task = asyncio.create_task(self._receive_audio(track))
+            self._track_tasks[key] = task
+            self._receivers.add(task)
+            def finished(done):
+                self._receivers.discard(done)
+                if self._track_tasks.get(key) is done:
+                    self._track_tasks.pop(key, None)
+                if not done.cancelled() and done.exception() is not None:
+                    logger.warning("Audio receiver failed: %s", type(done.exception()).__name__)
+            task.add_done_callback(finished)
 
-        # Start the agent session
-        await self._start_agent_session()
+        @room.on("track_unsubscribed")
+        def unsubscribed(track, publication, remote):
+            if self._room is not room:
+                return
+            key = getattr(publication, "sid", None) or id(track)
+            task = self._track_tasks.get(key)
+            if task is not None:
+                task.cancel()
 
-    def _setup_participant_events(self, participant) -> None:
-        """Set up participant event handlers for audio and text events."""
+        for remote in room.remote_participants.values():
+            for publication in remote.track_publications.values():
+                if publication.track is not None:
+                    subscribed(publication.track, publication, remote)
 
-        @participant.on("track_subscribed")
-        def on_track_subscribed(track, publication, **kwargs):
-            """Handle subscribed audio tracks."""
-            logger.debug(f"Track subscribed: {track.kind}")
-            if track.kind == "audio":
-                logger.info("Remote audio track subscribed")
-
-        @participant.on("track_published")
-        def on_track_published(publication, **kwargs):
-            """Handle published tracks."""
-            logger.debug(f"Track published: {publication.track.kind if publication.track else None}")
-
-        @participant.on("connection_quality_changed")
-        def on_connection_quality_changed(info):
-            """Handle connection quality changes."""
-            logger.info(f"Connection quality changed: {info}")
-
-        @participant.on("disconnected")
-        def on_disconnected():
-            """Handle participant disconnection."""
-            logger.info("Participant disconnected")
-            asyncio.create_task(self._handle_disconnection())
-
-        @participant.on("connected")
-        def on_connected():
-            """Handle room connection established."""
-            logger.info("Room connection established")
-            asyncio.create_task(self._handle_connection_established())
-
-    async def _start_agent_session(self) -> None:
-        """Start the MARK agent session through the adapter."""
-        if not self.markdown_adapter or not self.llm_gateway:
-            logger.warning("MarkLive adapter or LLM gateway not available")
-            return
-
+    async def _receive_audio(self, track):
+        from livekit import rtc
+        import numpy as np
+        stream = rtc.AudioStream(track, sample_rate=16000, num_channels=1)
+        frames = bytearray()
+        silence = 0
         try:
-            logger.info("Starting MARK agent session through LiveKit adapter")
-        except Exception as e:
-            logger.error(f"Failed to start agent session: {e}", exc_info=True)
+            async for event in stream:
+                if not self._is_running:
+                    break
+                data = bytes(event.frame.data)
+                samples = np.frombuffer(data, dtype="<i2").astype(np.float32)
+                voiced = bool(samples.size and np.sqrt(np.mean(samples * samples)) > 450)
+                if voiced and self._turn_task is not None and not self._turn_task.done():
+                    await self.interrupt()
+                if voiced or frames:
+                    frames.extend(data)
+                silence = 0 if voiced else silence + len(data)
+                if frames and (silence >= 19200 or len(frames) >= 320000):
+                    utterance = bytes(frames)
+                    frames.clear()
+                    silence = 0
+                    if len(utterance) >= 9600:
+                        text = await self.stt_engine.transcribe(utterance, 16000)
+                        if text:
+                            self.submit_text(text)
+        finally:
+            await stream.aclose()
 
-    async def _handle_disconnection(self) -> None:
-        """Handle participant disconnection gracefully."""
-        logger.info("Handling disconnection in LiveKit worker")
-        self._is_running = False
-        self._cancel_requested = True
-
-        # Cancel any active tasks
-        if self._active_task_id:
-            from core.task_manager import TASKS
-            TASKS.request_cancel(self._active_task_id)
-            self._active_task_id = None
-
-        await self._cleanup()
-
-    async def _handle_connection_established(self) -> None:
-        """Handle room connection establishment."""
-        logger.info("Connection established, restoring context")
-        self._is_running = True
-        await self._restore_context()
-
-    async def _restore_context(self) -> None:
-        """Restore conversation context after reconnection."""
-        try:
-            from memory import db
-            active = db.get_active_conversation()
-            if active:
-                turns = db.load_conversation_turns(conversation_id=active["id"])
-                logger.info(f"Restored {len(turns)} conversation turns")
-                if self.markdown_adapter:
-                    for turn in turns:
-                        pass
-        except Exception as e:
-            logger.error(f"Failed to restore context: {e}", exc_info=True)
-
-    async def _cleanup(self) -> None:
-        """Clean up resources."""
-        logger.info("Cleaning up LiveKit worker resources")
-        self._is_running = False
-        self._interrupted = False
-        self._cancel_requested = False
-        self._local_cancel_event.set()
-        self._session = None
-
-    async def speak_text(self, text: str) -> None:
-        """Generate and play text-to-speech.
-
-        Args:
-            text: Text to speak
-        """
+    def submit_text(self, text):
         if not self._is_running:
             return
+        if self._turn_task is not None and not self._turn_task.done():
+            self._pending_text = text
+            self._cancel.set()
+            if self._source:
+                self._source.clear_queue()
+            return
+        self._turn_task = asyncio.create_task(self.handle_text(text))
+        self._tasks.add(self._turn_task)
+        self._turn_task.add_done_callback(self._turn_finished)
 
+    def _turn_finished(self, task):
+        self._tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.error("Voice turn failed: %s", type(task.exception()).__name__)
+        if self._turn_task is task:
+            self._turn_task = None
+            pending, self._pending_text = self._pending_text, None
+            if pending and self._is_running:
+                self.submit_text(pending)
+
+    async def handle_text(self, text):
+        from core.agents.runtime import execute_turn
+        from memory import db
+        async with self._turn_lock:
+            if not self._is_running:
+                return
+            self._cancel.clear()
+            lock = self.markdown_adapter._local_command_lock
+            if not lock.acquire(blocking=False):
+                await self.speak_text("Another task is running. Please try again.")
+                return
+            try:
+                active = await asyncio.to_thread(db.get_active_conversation)
+                conversation_id = active["id"] if active else None
+                loop = asyncio.get_running_loop()
+                queue = asyncio.Queue(maxsize=64)
+                overflow = False
+                buffer = SentenceBuffer()
+                streamed = False
+                def enqueue(value):
+                    nonlocal overflow
+                    if overflow or self._cancel.is_set():
+                        return
+                    try:
+                        queue.put_nowait(value)
+                    except asyncio.QueueFull:
+                        # Preserve the final answer in the database; stop incremental
+                        # delivery rather than accumulating unlimited queued audio.
+                        overflow = True
+                def delta(value):
+                    if not self._cancel.is_set():
+                        loop.call_soon_threadsafe(enqueue, value)
+                async def consume():
+                    nonlocal streamed
+                    while True:
+                        value = await queue.get()
+                        if value is None:
+                            tail = buffer.flush()
+                            if tail and not overflow and not self._cancel.is_set():
+                                await self.speak_text(tail)
+                            return
+                        if self._cancel.is_set() or overflow:
+                            continue
+                        streamed = True
+                        await self._room.local_participant.publish_data(
+                            value.encode("utf-8"), reliable=True, topic="mark.response.delta")
+                        for sentence in buffer.feed(value):
+                            if not self._cancel.is_set():
+                                await self.speak_text(sentence)
+                consumer = asyncio.create_task(consume())
+                try:
+                    try:
+                        answer = await asyncio.to_thread(
+                            execute_turn, text, dispatch=self.markdown_adapter._dispatch_sync,
+                            declarations=self.markdown_adapter._all_declarations,
+                            conversation_id=conversation_id, cancelled=self._cancel.is_set, on_delta=delta)
+                    except Exception as exc:
+                        logger.error("Voice inference failed: %s", type(exc).__name__)
+                        answer = "[FAILED] Voice inference failed."
+                    head = answer.split("\nEXECUTION TRACE:")[0].strip()
+                    if self._cancel.is_set():
+                        head = "[CANCELLED] Voice turn interrupted; any tool effects may already exist."
+                    # Commit the completed turn before waiting for audio delivery.
+                    await asyncio.to_thread(db.append_conversation_turn, text, head,
+                                            channel="voice", conversation_id=conversation_id)
+                finally:
+                    if not consumer.done():
+                        # A failed consumer must not leave a producer blocked on a full queue.
+                        sentinel = asyncio.create_task(queue.put(None))
+                        await asyncio.wait((sentinel, consumer), return_when=asyncio.FIRST_COMPLETED)
+                        if not sentinel.done():
+                            sentinel.cancel()
+                            await asyncio.gather(sentinel, return_exceptions=True)
+                    try:
+                        await consumer
+                    except Exception as exc:
+                        logger.warning("Voice delivery failed: %s", type(exc).__name__)
+                if not self._cancel.is_set() and self._is_running:
+                    await self.send_text(head)
+                    if not streamed:
+                        await self.speak_text(head[:1800])
+                    elif overflow:
+                        await self.speak_text("The full response is available in text.")
+            finally:
+                lock.release()
+
+    async def send_text(self, text):
+        if self._is_running and self._room:
+            await self._room.local_participant.publish_data(text.encode("utf-8"), reliable=True,
+                                                             topic="mark.response")
+
+    async def speak_text(self, text):
+        from livekit import rtc
+        import numpy as np
+        if not self._is_running or self._cancel.is_set():
+            return
         self._is_speaking = True
-
         try:
-            if self.tts_engine:
-                audio_chunk = await self.tts_engine.synthes(text)
-                if audio_chunk:
-                    logger.debug(f"Generated TTS audio: {len(audio_chunk)} bytes")
-                else:
-                    logger.warning("TTS returned no audio")
-
-            if not self._is_speaking:
-                self._is_speaking = False
-
-        except Exception as e:
-            logger.error(f"Error during TTS: {e}", exc_info=True)
+            pcm = await self.tts_engine.synthesize(text)
+            rate = self.tts_engine.sample_rate
+            data = np.frombuffer(pcm, dtype="<i2")
+            if rate != 24000 and data.size:
+                size = round(data.size * 24000 / rate)
+                data = np.interp(np.arange(size) * rate / 24000, np.arange(data.size), data).astype("<i2")
+            for start in range(0, data.size, 480):
+                if self._cancel.is_set() or not self._is_running:
+                    break
+                chunk = data[start:start+480]
+                await self._source.capture_frame(rtc.AudioFrame(
+                    data=chunk.tobytes(), sample_rate=24000, num_channels=1,
+                    samples_per_channel=chunk.size))
+            if not self._cancel.is_set():
+                await self._source.wait_for_playout()
+        finally:
             self._is_speaking = False
 
-    async def interrupt(self) -> None:
-        """Handle user interrupt - stop current speech and cancel response."""
-        logger.info("User interrupt detected")
-        self._interrupted = True
-        self._cancel_requested = True
-        self._is_speaking = False
-        if self._local_cancel_event:
-            self._local_cancel_event.set()
+    async def interrupt(self):
+        self._cancel.set()
+        if self._source:
+            self._source.clear_queue()
 
-    async def send_text(self, text: str) -> None:
-        """Send a text message to the room.
-
-        Args:
-            text: Text message to send
-        """
-        if not self._is_running:
-            return
-        logger.info(f"Sending text to room: {text[:80]}...")
-
-    async def stop(self) -> None:
-        """Stop the LiveKit agent worker and clean up resources."""
-        logger.info("Stopping LiveKit Agent Worker")
+    async def stop(self):
         self._is_running = False
-        self._cancel_requested = True
-        self._interrupted = True
-        if self._local_cancel_event:
-            self._local_cancel_event.set()
-        await self._cleanup()
-
-    async def speak_text(self, text: str) -> None:
-        """Generate and play text-to-speech.
-
-        Args:
-            text: Text to speak
-        """
-        if not self._is_running:
-            return
-
-        self._is_speaking = True
-
+        self._pending_text = None
+        await self.interrupt()
+        for task in tuple(self._receivers):
+            task.cancel()
+        if self._receivers:
+            await asyncio.gather(*tuple(self._receivers), return_exceptions=True)
+        # Let in-flight tool workers observe cancellation before disconnecting.
+        if self._tasks:
+            await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
+        room, source = self._room, self._source
+        self._room = None
+        self._source = None
+        self._track_tasks.clear()
         try:
-            if self.tts_engine:
-                audio_chunk = await self.tts_engine.synthes(text)
-                if audio_chunk:
-                    logger.debug(f"Generated TTS audio: {len(audio_chunk)} bytes")
-                else:
-                    logger.warning("TTS returned no audio")
-
-            if not self._is_speaking:
-                self._is_speaking = False
-
-        except Exception as e:
-            logger.error(f"Error during TTS: {e}", exc_info=True)
-            self._is_speaking = False
-
-    async def interrupt(self) -> None:
-        """Handle user interrupt - stop current speech and cancel response."""
-        logger.info("User interrupt detected")
-        self._interrupted = True
-        self._cancel_requested = True
-        self._is_speaking = False
-        if self._local_cancel_event:
-            self._local_cancel_event.set()
+            if room:
+                await room.disconnect()
+        finally:
+            if source and hasattr(source, "aclose"):
+                await source.aclose()

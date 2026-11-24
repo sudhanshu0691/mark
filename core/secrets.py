@@ -31,15 +31,6 @@ except ImportError:
 
 def get_secret(name: str) -> str:
     key = str(name).strip().lower()
-    # config/api_keys.json is MARK's primary credential source. Keep the other
-    # stores as fallbacks for existing installs and environment-based deployments.
-    try:
-        cfg = json.loads(LEGACY.read_text(encoding="utf-8"))
-        value = str(cfg.get(_JSON_KEYS.get(key, ""), "")).strip()
-        if value:
-            return value
-    except (OSError, ValueError, TypeError):
-        pass
     env_value = os.environ.get(_ENV.get(key, ""), "").strip()
     if env_value:
         return env_value
@@ -49,6 +40,14 @@ def get_secret(name: str) -> str:
         if value and value.strip():
             return value.strip()
     except Exception:
+        pass
+    # Legacy installations remain readable until credentials are migrated.
+    try:
+        cfg = json.loads(LEGACY.read_text(encoding="utf-8"))
+        value = str(cfg.get(_JSON_KEYS.get(key, ""), "")).strip()
+        if value:
+            return value
+    except (OSError, ValueError, TypeError):
         pass
     return ""
 

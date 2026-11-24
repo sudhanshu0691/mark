@@ -4,6 +4,10 @@ from __future__ import annotations
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+CONFIG_DIR = BASE_DIR / "config"
+PLUGIN_DIR = BASE_DIR / "plugins"
+MEMORY_DIR = BASE_DIR / "memory"
+ASSET_DIR = BASE_DIR / "assets"
 DATA_DIR = BASE_DIR / "data"
 PROOF_DIR = DATA_DIR / "proof"            # before/after screenshots used by the verifier
 VIZ_DIR = DATA_DIR / "visualisations"     # diagrams and drawings

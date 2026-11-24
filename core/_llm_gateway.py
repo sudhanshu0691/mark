@@ -1,78 +1,115 @@
-"""LLM Gateway for MARK - streaming token generation and context management.
-
-This module provides a centralized LLM gateway that preserves the currently configured
-local LLM and its inference runtime. It handles streaming, context management, tool calling,
-and timeout/cancellation support.
-
-Philosophy: One LLM gateway, used by all agents (conversation, system, browser, file, vision, etc.).
-No duplicate intelligence engines for voice vs text.
-"""
-
+"""Async adapter over the central cloud LLM with incremental text events."""
 from __future__ import annotations
-
 import asyncio
-import logging
+import threading
+from contextlib import suppress
 from abc import ABC, abstractmethod
-from pathlib import Path
-from typing import Any, AsyncIterator, Optional, Tuple
-
-logger = logging.getLogger(__name__)
-
+from dataclasses import dataclass
+from typing import AsyncIterator
 
 class LLMResponseEvent:
-    """Typed event from LLM streaming generation."""
-    pass
+    """Base response event."""
 
-
+@dataclass
 class LLMStartEvent(LLMResponseEvent):
-    """Emitted when LLM generation starts."""
     pass
 
-
+@dataclass
 class TextDeltaEvent(LLMResponseEvent):
-    """Emitted when a new text token/delta is available."""
     text: str
     delta: str
 
-
+@dataclass
 class ToolCallEvent(LLMResponseEvent):
-    """Emitted when the LLM requests a tool call."""
     tool_name: str
     tool_args: dict
     tool_call_id: str
 
-
+@dataclass
 class ToolResultEvent(LLMResponseEvent):
-    """Emitted when a tool execution result is available."""
     tool_name: str
     tool_call_id: str
     result: str
 
-
+@dataclass
 class LLMCompleteEvent(LLMResponseEvent):
-    """Emitted when LLM generation is complete."""
     full_text: str
     tool_calls: list | None = None
 
-
+@dataclass
 class LLMErrorEvent(LLMResponseEvent):
-    """Emitted when LLM generation encounters an error."""
     error: str
     recoverable: bool = True
 
-
 class CentralLLMGateway(ABC):
-    """Abstract base for LLM gateways."""
-
     @abstractmethod
-    async def generate(
-        self,
-        prompt: str,
-        system: str | None = None,
-        temperature: float = 0.0,
-        max_tokens: int | None = None,
-        timeout: float | None = None,
-        *,
-        cancellation_token: asyncio.Event | None = None,
-    ) -> AsyncIterator[LLMResponseEvent]:
+    async def generate(self, prompt: str, system: str | None = None,
+                       temperature: float = 0.0, max_tokens: int | None = None,
+                       timeout: float | None = None, *,
+                       cancellation_token: asyncio.Event | None = None) -> AsyncIterator[LLMResponseEvent]:
         raise NotImplementedError
+
+class CloudLLMGateway(CentralLLMGateway):
+    def __init__(self, config_path=None):
+        self.config_path = config_path
+
+    async def generate(self, prompt, system=None, temperature=0.0,
+                       max_tokens=None, timeout=None, *, cancellation_token=None):
+        from core import llm
+        if cancellation_token is not None and cancellation_token.is_set():
+            return
+        yield LLMStartEvent()
+        loop = asyncio.get_running_loop()
+        queue = asyncio.Queue()
+        stop = threading.Event()
+        messages = ([{"role": "system", "content": system}] if system else [])
+        messages.append({"role": "user", "content": prompt})
+
+        def publish(kind, value):
+            if not stop.is_set():
+                loop.call_soon_threadsafe(queue.put_nowait, (kind, value))
+
+        def run():
+            try:
+                result = llm.chat_raw(messages, role="text", temperature=temperature,
+                                      max_tokens=max_tokens, on_delta=lambda s: publish("delta", s),
+                                      cancelled=stop.is_set)
+                publish("complete", result.get("content", ""))
+            except Exception as exc:
+                publish("error", type(exc).__name__)
+
+        task = asyncio.create_task(asyncio.to_thread(run))
+        deadline = loop.time() + timeout if timeout is not None else None
+        text = ""
+        try:
+            while True:
+                if cancellation_token is not None and cancellation_token.is_set():
+                    return
+                if deadline is not None and loop.time() >= deadline:
+                    yield LLMErrorEvent("TimeoutError")
+                    return
+                try:
+                    kind, value = await asyncio.wait_for(queue.get(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    continue
+                if kind == "delta":
+                    text += value
+                    yield TextDeltaEvent(text=text, delta=value)
+                elif kind == "complete":
+                    yield LLMCompleteEvent(value)
+                    return
+                else:
+                    yield LLMErrorEvent(value)
+                    return
+        finally:
+            stop.set()
+            # Cancelling the await does not terminate a blocking SDK thread.
+            # The SDK's request timeout and the stop flag bound subsequent work.
+            if not task.done():
+                task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+
+# Compatibility with the old import. All inference is cloud routed.
+LocalLLMGateway = CloudLLMGateway

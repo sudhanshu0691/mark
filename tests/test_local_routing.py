@@ -1,25 +1,14 @@
-﻿from core import llm
+import pytest
+from core import llm
 
+def test_offline_cloud_inference_rejected(monkeypatch):
+    monkeypatch.setattr(llm, "load_config", lambda: {"profile": "offline", "backend": "multi_provider"})
+    with pytest.raises(llm.LLMUnavailable):
+        llm.chat_raw([{"role":"user","content":"hello"}])
 
-def test_local_chat_uses_configured_model_and_reports_activity(monkeypatch):
-    cfg = {**llm.DEFAULTS, 'backend': 'ollama'}
-    monkeypatch.setattr(llm, 'load_config', lambda: cfg)
-    monkeypatch.setattr(llm, '_ensure_server', lambda: None)
-    calls, events = [], []
-    monkeypatch.setattr(llm, '_provider_listener', events.append)
-    monkeypatch.setattr(llm, '_post', lambda path, payload: calls.append((path, payload)) or {'message': {'content': 'hello'}})
-    assert llm.generate('hi') == 'hello'
-    assert calls[0][0] == '/api/chat'
-    assert calls[0][1]['model'] == cfg['text_model']
-    assert events == ['ollama', 'sleep']
-
-
-def test_local_vision_selects_vision_model(monkeypatch):
-    cfg = {**llm.DEFAULTS, 'backend': 'ollama'}
-    monkeypatch.setattr(llm, 'load_config', lambda: cfg)
-    monkeypatch.setattr(llm, '_ensure_server', lambda: None)
-    calls = []
-    monkeypatch.setattr(llm, '_post', lambda path, payload: calls.append(payload) or {'message': {'content': 'image'}})
-    assert llm.vision(b'image', 'what is this?') == 'image'
-    assert calls[0]['model'] == cfg['vision_model']
-    assert calls[0]['messages'][-1]['images']
+def test_vision_uses_cloud_provider(monkeypatch):
+    cfg = {**llm.DEFAULTS, "backend":"multi_provider", "allow_cloud_vision":True,
+           "free_tier_only":False}
+    monkeypatch.setattr(llm, "load_config", lambda: cfg)
+    monkeypatch.setattr(llm, "_gemini_chat", lambda *args: {"content":"image"})
+    assert llm.vision(b"image", "what is this?") == "image"

@@ -49,3 +49,60 @@ def test_conversation_history_is_not_pruned_or_truncated(tmp_path, monkeypatch):
         assert conn.execute("SELECT COUNT(*) FROM conversation_turns").fetchone()[0] == 101
         assert conn.execute("SELECT user FROM conversation_turns ORDER BY id LIMIT 1").fetchone()[0] == long_text
     assert len(db.load_conversation_turns()) == 100
+
+
+def test_conversation_search_is_scoped(tmp_path, monkeypatch):
+    from memory import db
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "search.db")
+    monkeypatch.setattr(db, "LEGACY_LONG_TERM", tmp_path / "missing.json")
+    monkeypatch.setattr(db, "LEGACY_CONVERSATION", tmp_path / "missing2.json")
+    first = db.start_conversation("first")
+    db.append_conversation_turn("orchid project", "first result", conversation_id=first)
+    second = db.start_conversation("second")
+    db.append_conversation_turn("orchid project", "second result", conversation_id=second)
+    rows = db.search_conversation_turns("orchid", conversation_id=first)
+    assert [r["assistant"] for r in rows] == ["first result"]
+    assert db.get_active_conversation()["id"] == second
+
+def test_private_context_is_not_loaded(monkeypatch):
+    from memory import conversation
+    monkeypatch.setattr(conversation, "recent_messages", lambda **kwargs: (_ for _ in ()).throw(AssertionError("private history read")))
+    assert conversation.build_turn_context("hello", share_cloud=False) == ([], "")
+
+
+def test_explicit_local_recall_preserves_session_and_avoids_cloud(tmp_path, monkeypatch):
+    from memory import db
+    from core.agents import orchestrator as o
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "recall.db")
+    monkeypatch.setattr(db, "LEGACY_LONG_TERM", tmp_path / "missing-long.json")
+    monkeypatch.setattr(db, "LEGACY_CONVERSATION", tmp_path / "missing-history.json")
+    first = db.start_conversation("first")
+    db.append_conversation_turn("orchid project", "first answer", conversation_id=first)
+    second = db.start_conversation("second")
+    db.append_conversation_turn("orchid project", "private other answer", conversation_id=second)
+    monkeypatch.setattr(o.llm, "load_config", lambda: (_ for _ in ()).throw(AssertionError("cloud accessed")))
+    answer = o.MasterOrchestrator().execute("history search orchid", conversation_id=first,
+        dispatch=lambda *args: None, declarations=lambda: [])
+    assert "first answer" in answer
+    assert "private other answer" not in answer
+    assert db.get_active_conversation()["id"] == second
+
+
+def test_schema_initialized_once_per_database(tmp_path, monkeypatch):
+    from memory import db
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "once.db")
+    monkeypatch.setattr(db, "LEGACY_LONG_TERM", tmp_path / "missing-long.json")
+    monkeypatch.setattr(db, "LEGACY_CONVERSATION", tmp_path / "missing-history.json")
+    calls = []
+    original = db._ensure_columns
+    def counted(conn):
+        calls.append(1)
+        return original(conn)
+    monkeypatch.setattr(db, "_ensure_columns", counted)
+    db.init_db()
+    db.append_conversation_turn("hello", "hi")
+    db.load_conversation_turns()
+    assert len(calls) == 1
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "other.db")
+    db.init_db()
+    assert len(calls) == 2

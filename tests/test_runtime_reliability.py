@@ -26,12 +26,10 @@ def test_local_routes(utterance, name):
     assert intent.match_local_command(utterance + " and delete a file") is None
 
 
-def test_offline_adapter_uses_local_provider(monkeypatch):
-    monkeypatch.setattr(llm, "load_config", lambda: {"backend": "ollama", "profile": "offline"})
-    local = Mock(return_value={"content": "local"})
-    monkeypatch.setattr(llm, "_ollama_chat", local)
-    assert llm.Client().models.generate_content(contents="hi").text == "local"
-    local.assert_called_once()
+def test_offline_adapter_rejects_cloud_inference(monkeypatch):
+    monkeypatch.setattr(llm, "load_config", lambda: {"backend": "multi_provider", "profile": "offline"})
+    with pytest.raises(llm.LLMUnavailable):
+        llm.Client().models.generate_content(contents="hi")
 
 
 def test_history_survives_new_instance_and_is_bounded(history):
@@ -44,7 +42,8 @@ def test_history_survives_new_instance_and_is_bounded(history):
     assert recent_messages() == []
 
 
-def test_live_reconnect_reuses_handle_then_restores_history(history):
+def test_live_reconnect_reuses_handle_then_restores_history(history, monkeypatch):
+    monkeypatch.setattr(llm, "load_config", lambda: {**llm.DEFAULTS, "share_history_with_cloud": True})
     history.append_conversation_turn("previous voice topic", "blue")
     live = MarkLive(Mock())
     live._all_declarations = lambda: []
@@ -64,6 +63,7 @@ def test_live_reconnect_reuses_handle_then_restores_history(history):
 
 
 def test_typed_commands_save_and_restore(history, monkeypatch):
+    monkeypatch.setattr(llm, "load_config", lambda: {**llm.DEFAULTS, "share_history_with_cloud": True})
     live = MarkLive(Mock())
     live._all_declarations = lambda: []
     live._dispatch_sync = Mock(return_value="[DONE] system status")
@@ -73,6 +73,10 @@ def test_typed_commands_save_and_restore(history, monkeypatch):
     monkeypatch.setattr(brain, "run_goal", planner)
     MarkLive(live.ui)._run_local_command("plan a related task")
     assert any(msg["content"] == "system info" for msg in planner.call_args.kwargs["history"])
+    monkeypatch.setattr(llm, "load_config", lambda: {**llm.DEFAULTS, "share_history_with_cloud": False})
+    MarkLive(live.ui)._run_local_command("plan another related task")
+    assert planner.call_args.kwargs["history"] == []
+    assert any(turn["user"] == "system info" for turn in history.load_conversation_turns())
 
 
 @pytest.mark.parametrize("args", [
@@ -123,7 +127,7 @@ def test_offline_startup_and_local_dispatch(history, monkeypatch):
     monkeypatch.setattr(main, "_get_api_key", lambda: pytest.fail("offline mode looked up voice key"))
     monkeypatch.setattr(main, "NOTIF_WATCHER", SimpleNamespace(listeners=[], start=lambda: SimpleNamespace(ok=True), stop=lambda: None))
     monkeypatch.setattr(main, "TASKS", Mock())
-    monkeypatch.setattr(llm, "load_config", lambda: {**llm.DEFAULTS, "profile":"offline", "backend":"ollama"})
+    monkeypatch.setattr(llm, "load_config", lambda: {**llm.DEFAULTS, "profile":"offline", "backend":"multi_provider"})
     monkeypatch.setattr(llm, "health", lambda: {"message":"Cloud disabled"})
     monkeypatch.setattr(main, "get_system_status", lambda: "CPU test")
     monkeypatch.setattr(live, "_report_verification", AsyncMock(return_value="UNVERIFIED"))
@@ -203,7 +207,7 @@ def test_recall_uses_previous_turn_without_planner(history, monkeypatch):
     history.append_conversation_turn("my test colour is blue", "ok", channel="typed")
     live = MarkLive(Mock())
     monkeypatch.setattr("main.TASKS", Mock())
-    monkeypatch.setattr(llm, "load_config", lambda: {**llm.DEFAULTS,"backend":"ollama", "share_history_with_cloud": True})
+    monkeypatch.setattr(llm, "load_config", lambda: {**llm.DEFAULTS,"backend":"multi_provider", "share_history_with_cloud": True})
     inference = Mock(return_value={"content":"blue"})
     monkeypatch.setattr(llm, "chat_raw", inference)
     monkeypatch.setattr(brain, "run_goal", Mock(side_effect=AssertionError("unneeded planner")))
