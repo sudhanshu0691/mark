@@ -54,3 +54,7 @@ vision_department/config/model_config.yaml
 /pytest_baseline.txt
 /voice_flow.txt
 /voice_out.txt
+
+# Generated verification reports
+/test-results.xml
+/coverage.xml

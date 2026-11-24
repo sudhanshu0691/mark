@@ -45,6 +45,8 @@ WANT = [
     ("livekit.api", "LiveKit room authentication", True),
     ("faster_whisper", "local speech recognition", True),
     ("torch", "local computer vision backend", True),
+    ("ultralytics", "vision detection", True),
+    ("dill", "trusted local vision checkpoint compatibility", True),
     ("winocr", "Windows OCR", True),
 ]
 

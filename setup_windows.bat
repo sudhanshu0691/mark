@@ -9,7 +9,7 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-uv sync --python 3.11 --extra livekit --no-dev
+uv sync --python 3.11 --extra livekit --extra vision --no-dev
 if errorlevel 1 (
     echo Dependency setup failed. See the uv error above.
     pause
@@ -21,5 +21,6 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-echo Configure Groq and Gemini credentials before starting MARK.
+echo Configure Groq and Gemini credentials using MARK or config\runtime.env.
+echo Run run_mark.bat to start MARK. Use run_mark.bat --console for diagnostics.
 pause

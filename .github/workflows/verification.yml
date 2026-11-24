@@ -52,4 +52,5 @@ jobs:
           path: |
             test-results.xml
             coverage.xml
+            uv.lock
           if-no-files-found: warn
