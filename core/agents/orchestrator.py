@@ -84,7 +84,7 @@ class MasterOrchestrator:
         return {
             "status": result.get("status", "failed"),
             "response": result.get("response", ""),
-            "model": result.get("model", "ollama"),
+            "model": result.get("model", "text"),
             "intent": intent.value,
             "complexity": complexity.value,
         }

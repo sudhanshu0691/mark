@@ -56,7 +56,6 @@ CONFIG_PATH = BASE_DIR / "config" / "llm.json"
 DEFAULTS: dict[str, Any] = {
     "profile": "balanced",
     "backend": "multi_provider",
-    "host": "http://127.0.0.1:11434",
     "text_model": "qwen/qwen3.8-27b", "code_model": "openai/gpt-oss-120b",
     "fast_model": "qwen/qwen3.8-27b", "vision_model": "gemini-3.1-flash-lite",
     "primary_provider": "groq", "fallback_providers": ["gemini"],
@@ -69,7 +68,7 @@ DEFAULTS: dict[str, Any] = {
                "max_retries": 2, "retry_backoff_s": [2, 5], "health_cache_s": 30},
 }
 
-_ENV = {"backend": "MARK_LLM_BACKEND", "host": "OLLAMA_HOST", "text_model": "MARK_TEXT_MODEL", "code_model": "MARK_CODE_MODEL", "fast_model": "MARK_FAST_MODEL", "vision_model": "MARK_VISION_MODEL"}
+_ENV = {"backend": "MARK_LLM_BACKEND", "text_model": "MARK_TEXT_MODEL", "code_model": "MARK_CODE_MODEL", "fast_model": "MARK_FAST_MODEL", "vision_model": "MARK_VISION_MODEL"}
 
 
 from core import providers
@@ -146,8 +145,6 @@ def load_config(refresh: bool = False) -> dict[str, Any]:
                 cfg[key] = os.environ[env]
         if isinstance(cfg.get("providers", {}).get("gemini"), dict):
             cfg["gemini"].update(cfg["providers"]["gemini"])
-        host = str(cfg["host"]).strip()
-        cfg["host"] = (host if host.startswith("http") else "http://" + host).rstrip("/")
         cfg["profile"] = os.getenv("MARK_PROFILE", cfg.get("profile", "balanced")).strip().lower()
         if cfg.get("backend") not in {"gemini", "multi_provider"}:
             raise LLMUnavailable("Unsupported LLM backend. Choose multi_provider or gemini.")
@@ -325,45 +322,6 @@ class InferenceProvider:
         return await self.generate(messages, **kwargs)
 
 
-# ── Ollama Provider ─────────────────────────────────────────────────────────
-
-class OllamaProvider(InferenceProvider):
-    def __init__(self, cfg: dict | None = None):
-        super().__init__(cfg)
-        self.host = self._ensure_host(cfg.get("host", "http://127.0.0.1:11434")) if cfg else "http://127.0.0.1:11434"
-        self.models: list = []
-        self._loaded_models: set = set()
-
-    def _ensure_host(self, host: str) -> str:
-        host = str(host).strip()
-        return (host if host.startswith("http") else "http://" + host).rstrip("/")
-    
-    def get_model_for_role(self, role: str) -> str:
-        cfg = load_config()
-        return cfg.get(f"{role}_model") or cfg["text_model"]
-    
-    def get_capabilities(self) -> dict[str, bool]:
-        return {"supports_tools": True, "supports_vision": True,
-                "supports_streaming": True, "supports_json": True}
-    
-    def health_check(self) -> dict:
-        return health()
-    
-    async def generate(self, messages: list[dict], **kwargs: Any) -> dict:
-        role = kwargs.get("role", "text")
-        result = await asyncio.to_thread(
-            chat_raw,
-            messages,
-            role,
-            kwargs.get("tools"),
-            kwargs.get("temperature"),
-            kwargs.get("max_tokens"),
-            kwargs.get("model"),
-            kwargs.get("json_mode", False),
-        )
-        return result
-
-
 class GeminiProvider(InferenceProvider):
     def __init__(self, cfg: dict | None = None):
         super().__init__(cfg)
@@ -414,108 +372,6 @@ def web_context(query: str, n: int | None = None) -> str:
         url = r.get("href") or r.get("url", "")
         lines.append(f"- {title}: {body[:300]} ({url})")
     return "\n".join(lines)
-
-
-_managed_process = None
-_start_lock = threading.Lock()
-
-
-def _ensure_server():
-    """Start a local server only when a local request needs it."""
-    global _managed_process
-    cfg = load_config()
-    host = cfg["host"]
-    def reachable():
-        try:
-            with urllib.request.urlopen(host + "/api/tags", timeout=0.5) as response:
-                return response.status == 200
-        except Exception:
-            return False
-    if reachable():
-        return
-    with _start_lock:
-        if reachable():
-            return
-        hostname = urlsplit(host).hostname or ""
-        try:
-            local = hostname.lower() == "localhost" or ipaddress.ip_address(hostname).is_loopback
-        except ValueError:
-            local = False
-        if not local:
-            return
-        executable = shutil.which("ollama")
-        if not executable:
-            candidate = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "ollama.exe"
-            executable = str(candidate) if candidate.is_file() else None
-        if not executable:
-            return
-        if _managed_process is None or _managed_process.poll() is not None:
-            kwargs = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
-                      "stderr": subprocess.DEVNULL, "env": {**os.environ, "OLLAMA_HOST": host}}
-            if os.name == "nt":
-                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-            try:
-                _managed_process = subprocess.Popen([executable, "serve"], **kwargs)
-            except OSError:
-                return
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            if reachable() or _managed_process.poll() is not None:
-                break
-            time.sleep(0.25)
-
-
-def stop_managed_server():
-    global _managed_process
-    with _start_lock:
-        process, _managed_process = _managed_process, None
-    if process is not None and process.poll() is None:
-        try:
-            process.terminate()
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
-
-
-# --------------------------------------------------------------------------- Ollama transport
-def _post(path: str, payload: dict, timeout: float | None = None) -> dict:
-    import requests
-    import time
-    cfg = load_config()
-    last_exc = None
-    # Fail quickly when Ollama is down; repeating a long inference timeout three
-    # times made a single user request appear frozen for many minutes.
-    attempts = 2 if timeout is None else 1
-    for attempt in range(attempts):
-        try:
-            r = requests.post(cfg["host"] + path, json=payload, timeout=timeout or cfg["timeout_s"])
-            last_exc = None
-            break
-        except requests.exceptions.ConnectionError as e:
-            last_exc = LLMUnavailable(
-                f"Ollama is not running at {cfg['host']}. Start it (open the Ollama app, or run `ollama serve`). "
-                f"Detail: {e.__class__.__name__}")
-            # connection errors are not transient usually; but retry once
-            if attempt + 1 < attempts:
-                time.sleep(1.0)
-                continue
-            raise last_exc from e
-        except requests.exceptions.Timeout as e:
-            last_exc = LLMUnavailable(f"Ollama took longer than {cfg['timeout_s']}s - model too big for this PC? Try a smaller one in config/llm.json.")
-            raise last_exc from e
-    if last_exc is not None:
-        raise last_exc
-    if r.status_code == 404 and "not found" in r.text.lower():
-        model = payload.get("model", "?")
-        raise LLMUnavailable(f"Model '{model}' is not installed. Run:  ollama pull {model}")
-    if r.status_code >= 400:
-        kind = "recoverable provider error" if r.status_code >= 500 else "request error"
-        raise LLMUnavailable(f"Ollama {kind} {r.status_code}.")
-    try:
-        return r.json()
-    except ValueError as exc:
-        raise LLMUnavailable("Ollama returned a malformed JSON response.") from exc
 
 
 def chat_raw(messages: list[dict], role: str = "text", tools: list[dict] | None = None,
@@ -646,39 +502,6 @@ def local_tool_selection(messages, tools, byte_budget):
     return selected
 
 
-def _ollama_chat(messages: list[dict], role: str, tools: list[dict] | None,
-                 temperature: float | None, max_tokens: int | None,
-                 model: str | None, json_mode: bool) -> dict:
-    cfg = load_config()
-    _ensure_server()
-    payload: dict[str, Any] = {
-        "model": model or model_for(role, cfg),
-        "messages": messages,
-        "stream": False,
-        "keep_alive": cfg.get("keep_alive", "30m"),
-        "options": {"num_ctx": int(cfg.get("num_ctx", 8192))},
-    }
-    if temperature is not None:
-        payload["options"]["temperature"] = float(temperature)
-    payload["options"]["num_predict"] = int(max_tokens or cfg.get("local_max_output_tokens", 384))
-    if tools:
-        payload["tools"] = local_tool_selection(messages, tools, int(cfg.get("local_tool_schema_bytes", 5200)))
-    if json_mode:
-        payload["format"] = "json"
-    payload["think"] = False                         # fast answers; reasoning models otherwise ramble
-    try:
-        data = _post("/api/chat", payload)
-    except LLMUnavailable as e:
-        if "think" in str(e).lower():                # model does not know the flag
-            payload.pop("think", None)
-            data = _post("/api/chat", payload)
-        else:
-            raise
-    if not isinstance(data, dict) or not isinstance(data.get("message"), dict):
-        raise LLMUnavailable("Ollama returned a malformed chat response.")
-    return data["message"]
-
-
 def generate(prompt: Any, role: str = "text", system: str | None = None,
              temperature: float | None = None, max_tokens: int | None = None,
              json_mode: bool = False) -> str:
@@ -761,7 +584,7 @@ class _Models:
         text, images = _normalise(contents)
         role = role_for(model, bool(images))
         cfg = load_config()
-        primary = cfg.get("backend", "ollama")
+        primary = cfg.get("backend", "multi_provider")
         if primary == "gemini":
             return _run_provider("gemini", _gemini_generate, role, contents, config)
         return _generate_content_adapter(role, contents, config)
@@ -779,13 +602,6 @@ def make_client(*_: Any, **__: Any) -> Client:
 
 
 # --------------------------------------------------------------------------- health + install help
-def missing_models(cfg: dict, installed: list[dict]) -> list[str]:
-    def tag(name):
-        return name if ":" in name.rsplit("/", 1)[-1] else name + ":latest"
-    available = {tag(m["name"]) for m in installed if m.get("name")}
-    return sorted({tag(model_for(role, cfg)) for role in ("text", "code", "fast", "vision")} - available)
-
-
 def health() -> dict:
     cfg = load_config()
     from core.secrets import get_secret
@@ -793,43 +609,6 @@ def health() -> dict:
     configured = [name for name in names if get_secret(name)]
     return {"ok": bool(configured), "backend": cfg["backend"], "missing": [],
             "message": "Credentials configured: " + ", ".join(configured) if configured else "Cloud credentials required."}
-
-
-def pull_missing(progress: Callable[[str], None] = print) -> list[str]:
-    """Download any configured model that is not installed. Returns the ones that failed."""
-    import requests
-    cfg = load_config()
-    failed_models: list[str] = []
-    try:
-        response = requests.get(cfg["host"] + "/api/tags", timeout=5)
-        response.raise_for_status()
-        missing = missing_models(cfg, response.json()["models"])
-    except (requests.RequestException, ValueError, KeyError) as exc:
-        progress(f"Ollama inventory unavailable: {type(exc).__name__}")
-        return ["Ollama inventory unavailable"]
-    for m in missing:
-        progress(f"Downloading {m} ...")
-        try:
-            with requests.post(cfg["host"] + "/api/pull", json={"model": m, "stream": True},
-                               stream=True, timeout=(5, 120)) as r:
-                r.raise_for_status()
-                last = ""
-                for line in r.iter_lines():
-                    if not line:
-                        continue
-                    event = json.loads(line)
-                    if event.get("error"):
-                        raise LLMUnavailable(str(event["error"]))
-                    st = event.get("status", "")
-                    if st != last:
-                        progress(f"  {m}: {st}")
-                        last = st
-                if last != "success":
-                    raise LLMUnavailable("Download ended before success")
-        except Exception as e:
-            progress(f"  could not pull {m}: {e}")
-            failed_models.append(m)
-    return failed_models
 
 
 # --------------------------------------------------------------------------- optional Gemini backend
@@ -1007,12 +786,9 @@ def _gemini_generate_model(model: str, prompt: str, cfg: dict):
     return response
 
 
-if __name__ == "__main__":                       # python -m core.llm [check|pull]
+if __name__ == "__main__":                       # python -m core.llm [check]
     import sys
     cmd = sys.argv[1] if len(sys.argv) > 1 else "check"
     h = health()
     print(f"backend: {h['backend']}  ->  {h['message']}")
-    if cmd == "pull" and load_config().get("backend") == "ollama":
-        failed = pull_missing()
-        sys.exit(1 if failed else 0)
     sys.exit(0 if h["ok"] else 1)

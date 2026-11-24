@@ -832,10 +832,10 @@ class MarkLive:
             self._livekit_token = _generate_livekit_token(room_name, participant_name)
 
             # Create the LiveKit agent worker
-            from core._llm_gateway import LocalLLMGateway
+            from core._llm_gateway import CloudLLMGateway
 
             # Initialize LLM gateway
-            llm_gateway = LocalLLMGateway(config_path="core/prompt.txt")
+            llm_gateway = CloudLLMGateway(config_path="core/prompt.txt")
 
             # Initialize STT engine
             from core._speech_stt import STTEngine
@@ -1004,6 +1004,9 @@ class MarkLive:
         self._interrupted = True
         self._cancel_requested = True
         self._local_cancel_event.set()
+        worker = getattr(self, "_livekit_worker", None)
+        if worker is not None and self._loop and self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(worker.interrupt(), self._loop)
         if self._active_task_id is not None:
             TASKS.request_cancel(self._active_task_id)
         self._ask_after_interrupt = bool(self.session)
@@ -1175,10 +1178,8 @@ class MarkLive:
         try:
             from core import llm as _llm_info
             _llm_cfg = _llm_info.load_config()
-            _backend = str(_llm_cfg.get("backend", "ollama")).lower()
-            if _backend == "ollama":
-                _llm_route = f"Text/code tasks use local Ollama ({_llm_cfg.get('text_model')})."
-            elif _backend == "gemini":
+            _backend = str(_llm_cfg.get("backend", "multi_provider")).lower()
+            if _backend == "gemini":
                 _llm_route = f"Text/code tasks use Gemini ({_llm_cfg.get('gemini', {}).get('text_model', 'configured model')})."
             else:
                 _llm_route = f"Configured text backend: {_backend}."
@@ -2401,7 +2402,7 @@ def main():
         if getattr(ui, "on_runtime_stop", None):
             ui.on_runtime_stop()
         worker.join(timeout=5)
-        _llm_boot.stop_managed_server()
+        _llm_boot.providers.close()
 
 if __name__ == "__main__":
     main()

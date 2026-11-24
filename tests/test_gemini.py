@@ -11,7 +11,7 @@ from core import llm
 @pytest.fixture
 def gemini_config(tmp_path, monkeypatch):
     path = tmp_path / "llm.json"
-    path.write_text(json.dumps({"backend": "gemini", "gemini": {
+    path.write_text(json.dumps({"backend": "gemini", "free_tier_only": False, "gemini": {
         "text_model": "gemini-3.8-flash", "live_model": "gemini-3.8-live",
         "memory_model": "gemini-3.8-flash", "timeout_s": 2, "max_retries": 2,
         "retry_backoff_s": [0, 0], "health_cache_s": 30}}), encoding="utf-8")
