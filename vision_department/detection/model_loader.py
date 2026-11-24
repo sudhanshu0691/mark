@@ -13,7 +13,7 @@ def load_model(path: Path, device: str = "auto") -> Any:
     try:
         from ultralytics import YOLO
     except ImportError as exc:
-        raise RuntimeError("Install the vision dependencies from requirements.txt (Ultralytics and PyTorch)") from exc
+        raise RuntimeError("Install vision dependencies with uv sync --extra vision") from exc
     # Loading is local only. Ultralytics is passed a concrete existing path.
     model = YOLO(str(path))
     names = getattr(model, "names", None)

@@ -62,7 +62,7 @@ dependencies = [
 
 [project.optional-dependencies]
 livekit = ["livekit-api", "livekit"]
-vision = ["ultralytics>=8.3,<9", "PyYAML>=6.0", "fastapi>=0.110", "uvicorn[standard]>=0.29", "qubopy==0.2.3"]
+vision = ["dill>=0.3.8,<1", "ultralytics>=8.3,<9", "PyYAML>=6.0", "fastapi>=0.110", "uvicorn[standard]>=0.29", "qubopy==0.2.3"]
 
 [dependency-groups]
 dev = ["pytest>=8", "pytest-asyncio", "pytest-qt", "pytest-cov", "ruff"]
