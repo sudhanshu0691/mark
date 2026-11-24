@@ -1,0 +1,25 @@
+model:
+  name: custom_yolov8_human_detection
+  # This is the supplied, validated model. Do not rename, replace, or retrain it.
+  path: human.pt
+  framework: ultralytics
+  confidence: 0.45
+  device: auto
+detection:
+  enabled: true
+  interval_seconds: 1.0
+  target_class: person # Matched by alias to the actual checkpoint class "Human" (index 0).
+  alert_cooldown_seconds: 30
+camera:
+  name: Qubo Smart Cam 360 3MP
+  enabled: true
+  provider: qubo_cloud
+  device_id: ""
+  quality: low
+recording:
+  enabled: false
+events:
+  retention_days: 30
+motion:
+  threshold: 25
+  min_area: 1200

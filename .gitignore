@@ -1,0 +1,55 @@
+# Python bytecode and test/tool caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local Python environments and editor/OS files
+.venv/
+venv/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local credentials and personal settings
+config/api_keys.json
+config/contacts.json
+config/phone.json
+config/permissions.json
+config/.env
+config/runtime.env
+.mark-test-*/
+.env
+
+# Runtime data (database, generated media, call recordings, screenshots)
+data/*
+!data/.gitkeep
+!data/samples/
+!data/samples/*.csv
+
+# Local assistant memory and logs
+memory/*.json
+memory/*.jsonl
+memory/*.db
+memory/*.migrated
+memory/workspaces.json
+
+# Private face enrollment and camera configuration
+memory/identity/*
+!memory/identity/.gitkeep
+vision_department/config/model_config.yaml
+
+# Local investigation output and scratch scripts
+/_tmp_*.py
+/base*.txt
+/*_imp.txt
+/imp2.txt
+/import_check.txt
+/m1.txt
+/pytest_baseline.txt
+/voice_flow.txt
+/voice_out.txt

@@ -1,0 +1,32 @@
+{
+  "backend": "ollama",
+  "web_results": 6,
+  "gemini": {
+    "text_model": "gemini-flash-lite-latest",
+    "live_model": "gemini-2.5-flash-native-audio-latest",
+    "memory_model": "gemini-flash-lite-latest",
+    "timeout_s": 60,
+    "max_retries": 2,
+    "retry_backoff_s": [
+      2,
+      5
+    ],
+    "health_cache_s": 30
+  },
+  "profile": "balanced",
+  "share_history_with_cloud": false,
+  "speak_local_replies": false,
+  "cloud_limits": {
+    "requests_per_day": 0,
+    "requests_per_task": 12
+  },
+  "stream_text": true,
+  "host": "http://127.0.0.1:11434",
+  "text_model": "qwen3:4b",
+  "code_model": "qwen3:4b",
+  "fast_model": "qwen3:4b",
+  "vision_model": "qwen2.5vl:3b",
+  "num_ctx": 4096,
+  "timeout_s": 60,
+  "keep_alive": "30m"
+}

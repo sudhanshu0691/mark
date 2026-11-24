@@ -1,0 +1,11 @@
+# MARK engineering audit
+
+
+| ID | Severity | Baseline evidence and reproduction | Impact | Fix and verification |
+| --- | --- | --- | --- | --- |
+| M01 | High | main.py MarkLive._receive_audio and _build_config around lines 1405 and 1030. The receiver ignored session_resumption_update. Every connection constructed SessionResumptionConfig() with no handle. | A new socket started a new model conversation. | Pass the last resumable handle to the next connection and recover a fresh session from bounded history. See reconnect tests. |
+| M02 | High | main.py MarkLive._run_local_command around line 795. Typed responses went to _session_log only. The planner received saved facts but no recent turns. | Typed follow-ups lost their subject after a restart. | Save completed typed turns to SQLite and supply recent context to permitted routes. |
+| M03 | High | core/llm.py health around line 634 stripped size tags. With 7b installed and 3b configured, startup reported the 3b vision model present. pull_missing also treated an incomplete stream as success. | Setup skipped the actual configured model. | Compare exact normalized tags and require a successful terminal download response. |
+| M04 | High | main.py main and MarkLive.run called health before showing the UI or opening the voice connection. Gemini health can issue inference. Typed commands also checked health before dispatch. | Local input waited for an unrelated provider. | Move startup readiness off the UI thread, remove inference warmup and route fixed commands directly. |
+| M05 | High | actions/desktop.py desktop_control around line 460 sent unknown desktop actions to generated Python. main.py _execute_tool around line 1040 invoked tools with model-provided confirmation arguments. | Generated operations could affect the host with the user’s privileges. | Remove generated desktop execution and check sensitive operations against interactive approval. |
+| M06 | Medium | core/intent.py decision_record accessed verified_facts and assumptions, which were defined after the function return. Calling it with a normal Intent raised AttributeError. | Decision recording failed. | Define the fields on Intent and exercise a real record. |

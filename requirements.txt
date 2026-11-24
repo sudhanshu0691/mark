@@ -1,0 +1,52 @@
+# Python 3.11 or 3.12 (64-bit) on Windows 10/11
+# Core: UI, voice, brain, web, documents, screen, monitoring
+PySide6>=6.7
+sounddevice
+numpy
+pandas
+google-genai             # SDK imported by the runtime. Gemini credentials and cloud use are optional.
+python-dotenv
+openpyxl>=3.1
+keyring>=25
+requests
+ddgs                      # web search (do NOT also install the old 'duckduckgo-search' package)
+edge-tts
+miniaudio
+pydub
+pillow
+pytesseract               # OCR *binding* only; needs the Tesseract engine (optional - see below)
+mss>=10.2
+opencv-python>=4.8,<5
+psutil
+nvidia-ml-py              # GPU telemetry (ships the 'pynvml' module; do NOT install the old 'pynvml' package)
+send2trash
+pyautogui
+pyperclip
+pygetwindow
+pdfplumber
+pypdf>=7.1.1,<8
+python-docx
+python-pptx
+youtube-transcript-api
+playwright
+
+# Diagrams, drawings, call answering (all free)
+ezdxf                     # DXF drawings
+faster-whisper            # local speech-to-text (calls)
+
+# Windows-only (OS control, UI automation, volume, notifications)
+pyaudiowpatch; sys_platform == "win32"   # captures the caller's audio (WASAPI loopback)
+pywin32; sys_platform == "win32"
+pywinauto; sys_platform == "win32"
+comtypes; sys_platform == "win32"
+pycaw; sys_platform == "win32"
+win10toast; sys_platform == "win32"
+wmi; sys_platform == "win32"              # temperature sensors, thermal zones (system_monitor, hardware_control)
+
+# Optional heavy local ML adapter packages (install only if using that backend)
+# transformers
+torch
+winocr                   # built-in Windows OCR for screen_read text (no Tesseract needed)
+#   Tesseract engine        # alternative OCR: https://github.com/UB-Mannheim/tesseract/wiki
+#   ffmpeg                  # full audio/video conversion: winget install Gyan.FFmpeg
+#                           # (without it, audio trim/convert only supports wav/mp3 basics)

@@ -1,0 +1,106 @@
+"""Risk classification for actions. Used to gate destructive/sensitive operations."""
+from __future__ import annotations
+
+READ_ONLY = "read"
+WRITE = "write"
+DESTRUCTIVE = "destructive"
+EXTERNAL = "external"
+
+RISK_MAP = {
+    "file_controller": {
+        "drives": READ_ONLY, "list": READ_ONLY, "read": READ_ONLY, "info": READ_ONLY,
+        "find": READ_ONLY, "disk_usage": READ_ONLY,
+        "write": WRITE, "append": WRITE, "mkdir": WRITE, "copy": WRITE,
+        "move": WRITE, "rename": WRITE, "zip": WRITE, "unzip": WRITE, "open": WRITE,
+        "delete": DESTRUCTIVE,
+    },
+    "whatsapp": {"send": EXTERNAL, "read": READ_ONLY, "open": WRITE},
+    "send_message": {"*": EXTERNAL},
+    "calls": {"*": EXTERNAL},
+    "software_manager": {"*": WRITE},
+    "open_app": {"*": WRITE},
+    "browser_control": {"*": WRITE},
+    "computer_control": {"*": WRITE},
+    "computer_settings": {"*": WRITE},
+    "desktop_control": {"*": WRITE},
+    "window_manager": {"*": WRITE},
+    "code_helper": {"*": WRITE},
+    "dev_agent": {"*": WRITE},
+    "file_processor": {"*": WRITE},
+}
+
+# Discrete operations required for the deterministic local route.
+READ_ONLY_PLUGINS = {"runtime_status", "calculate", "news_plugin", "weather_plugin", "vision_status", "vision_history"}
+SAFE_SETTINGS = {"volume_up", "volume_down", "volume_mute", "volume_set", "brightness_set", "copy", "select_all", "undo", "redo"}
+RISK_MAP.update({
+    "computer_settings": {**dict.fromkeys(SAFE_SETTINGS, WRITE), "*": DESTRUCTIVE},
+    "computer_control": {"screenshot": READ_ONLY, "*": EXTERNAL},
+    "hardware_control": {"mute": WRITE, "volume": WRITE, "battery": READ_ONLY, "info": READ_ONLY, "*": DESTRUCTIVE},
+    "browser_control": {**dict.fromkeys(("open", "navigate", "tabs", "list_tabs", "read", "back", "forward"), WRITE), "*": EXTERNAL},
+    "desktop_control": {"clean": DESTRUCTIVE, "organize": DESTRUCTIVE, "*": WRITE},
+    "processes": {"top": READ_ONLY, "find": READ_ONLY, "*": DESTRUCTIVE}, "app_integration": {"list": READ_ONLY, "status": READ_ONLY, "focus": WRITE, "launch": WRITE, "*": DESTRUCTIVE},
+    "whatsapp": {"read": READ_ONLY, "open": WRITE, "*": EXTERNAL},
+    "send_email": {"*": EXTERNAL}, "message_delivery": {"*": EXTERNAL},
+    "plugins": {"remove": DESTRUCTIVE, "reload": WRITE}, "vision_start": {"*": EXTERNAL},
+    "call_agent": {"status": READ_ONLY, "*": EXTERNAL},
+    "software_manager": {"list": READ_ONLY, "search": READ_ONLY, "*": DESTRUCTIVE},
+    "excel": {"inspect": READ_ONLY, "profile": READ_ONLY, "*": DESTRUCTIVE},
+    "code_helper": {"explain": READ_ONLY, "*": DESTRUCTIVE}, "dev_agent": {"*": DESTRUCTIVE},
+    "file_controller": {**RISK_MAP["file_controller"], **dict.fromkeys(("move", "write", "rename", "unzip", "copy", "zip", "open"), DESTRUCTIVE)},
+    "window_manager": {"close": DESTRUCTIVE, "*": WRITE},
+    "shutdown_mark": {"*": DESTRUCTIVE},
+})
+
+# Explicit interaction categories override the conservative defaults above.
+LOW, MEDIUM, HIGH = READ_ONLY, WRITE, DESTRUCTIVE
+RISK_MAP["computer_settings"]["*"] = MEDIUM
+RISK_MAP["computer_settings"].update(dict.fromkeys(
+    ("shutdown", "restart", "sleep", "lock", "kill_app", "format", "security"), HIGH))
+RISK_MAP["file_controller"]["open"] = LOW
+RISK_MAP["open_app"] = {"*": LOW}
+RISK_MAP["computer_control"].update(dict.fromkeys(
+    ("scroll", "move", "click", "double_click", "right_click", "screen_click",
+     "screen_find", "screenshot", "focus_window", "wait", "copy"), LOW))
+RISK_MAP["computer_settings"].update(dict.fromkeys(
+    ("zoom_in", "zoom_out", "zoom_reset", "scroll_up", "scroll_down", "scroll_top",
+     "scroll_bottom", "page_up", "page_down", "go_back", "go_forward"), LOW))
+RISK_MAP["browser_control"].update(dict.fromkeys(
+    ("open", "navigate", "tabs", "list_tabs", "read", "back", "forward", "scroll"), LOW))
+RISK_MAP["window_manager"].update(dict.fromkeys(
+    ("list", "active", "focus", "switch", "maximize", "minimize", "snap_left", "snap_right", "wait"), LOW))
+RISK_MAP["software_manager"].update({"install": MEDIUM, "uninstall": HIGH})
+RISK_MAP["file_controller"].update(dict.fromkeys(
+    ("write", "append", "mkdir", "copy", "move", "rename", "zip", "unzip"), MEDIUM))
+
+def classify(tool: str, args: dict | None = None) -> str:
+    args = args or {}
+    cfg = RISK_MAP.get(tool, {})
+    action = str(args.get("action") or args.get("mode") or "*").strip().lower().replace("-", "_").replace(" ", "_")
+    if action in cfg:
+        return cfg[action]
+    if "*" in cfg:
+        return cfg["*"]
+    return READ_ONLY
+
+def requires_confirmation(tool: str, args: dict | None = None) -> bool:
+    return classify(tool, args) in (DESTRUCTIVE, EXTERNAL)
+
+
+def validate_arguments(declaration, args):
+    if declaration is None:
+        return "Unknown tool."
+    schema = declaration.get("parameters") or {}
+    fields = schema.get("properties") or {}
+    for key in schema.get("required", []):
+        if key not in args:
+            return f"Missing required argument {key}."
+    types = {"STRING": str, "BOOLEAN": bool, "INTEGER": int, "NUMBER": (int, float),
+             "ARRAY": list, "OBJECT": dict}
+    for key, value in args.items():
+        if key not in fields:
+            return f"Unknown argument {key}."
+        kind = str(fields[key].get("type", "")).upper()
+        if kind in types and (not isinstance(value, types[kind]) or
+                (kind in {"NUMBER", "INTEGER"} and isinstance(value, bool))):
+            return f"Invalid type for {key}."
+    return ""

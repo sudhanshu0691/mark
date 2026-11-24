@@ -1,0 +1,7 @@
+# Optional MARK Vision Department dependencies (Python 3.11 or 3.12, 64-bit).
+ultralytics>=8.3,<9
+PyYAML>=6.0
+fastapi>=0.110
+uvicorn[standard]>=0.29
+# Community, reverse-engineered Qubo Cloud client; exact firmware compatibility is not guaranteed.
+qubopy==0.2.3

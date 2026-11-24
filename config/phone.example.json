@@ -1,0 +1,14 @@
+{
+  "user_name": "",
+  "assistant_name": "Mark",
+  "language": "en",
+  "whisper_model": "small",
+  "cable_output": "CABLE Input",
+  "edge_voice_en": "en-US-GuyNeural",
+  "edge_voice_hi": "hi-IN-MadhurNeural",
+  "piper_exe": "",
+  "piper_voice_en": "",
+  "piper_voice_hi": "",
+  "max_seconds": 600,
+  "silence_timeout_s": 20
+}
