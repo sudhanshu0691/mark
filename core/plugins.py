@@ -32,7 +32,7 @@ import re
 import threading
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from concurrent.futures import ThreadPoolExecutor, TimeoutError, Future
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable
@@ -54,6 +54,7 @@ class PluginContext:
         self.base_dir = base_dir or PLUGIN_DIR.parent
         self.plugin_dir = PLUGIN_DIR
         self.permissions = permissions or set()
+        self.cancelled = threading.Event()
 
     def log(self, text: str) -> None:
         if self.ui:
@@ -62,11 +63,13 @@ class PluginContext:
 
     def speak(self, text: str) -> None:
         """Make Mark say something (it will phrase it naturally)."""
-        if self._speak:
+        if self._speak and not self.cancelled.is_set():
             self._speak(text)
 
     def call_tool(self, name: str, args: dict | None = None) -> str:
         """Run any other Mark tool (open_app, file_controller, whatsapp ...)."""
+        if self.cancelled.is_set():
+            return "[CANCELLED] plugin invocation is no longer active"
         if not self._call_tool:
             return "[FAILED] tool bridge not ready"
         if "*" not in self.permissions and name not in self.permissions:
@@ -94,6 +97,8 @@ class PluginManager:
         self._mtimes: dict[str, float] = {}
         self._lock = threading.RLock()
         self._stop = threading.Event()
+        self._inflight: dict[str, tuple[Future, PluginContext]] = {}
+        self._pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix='mark-plugin')
         self.on_change: Callable[[], None] | None = None
         PLUGIN_DIR.mkdir(exist_ok=True)
 
@@ -101,6 +106,7 @@ class PluginManager:
         from copy import copy
         context = copy(self.ctx)
         context.permissions = set(loaded.permissions)
+        context.cancelled = threading.Event()
         return context
 
     # ── discovery ────────────────────────────────────────────────────────────
@@ -186,6 +192,8 @@ class PluginManager:
 
     def load_all(self, builtin_names: set[str] | None = None) -> None:
         with self._lock:
+            if self._inflight:
+                return
             self._builtin = builtin_names if builtin_names is not None else getattr(self, "_builtin", set())
             for l in list(self.loaded.values()):
                 self._unload(l)
@@ -257,21 +265,42 @@ class PluginManager:
             return f"[FAILED] {error}"
         if owner.health == "unhealthy":
             return f"[FAILED] plugin tool '{name}' is unhealthy"
-        try:
-            def invoke() -> Any:
+        from core.risk import validate_arguments
+        error = validate_arguments(owner.tools[name]["declaration"], args)
+        if error:
+            return f"[FAILED] Invalid plugin arguments: {error}"
+        with self._lock:
+            if self._stop.is_set():
+                return "[CANCELLED] plugin manager is stopping"
+            if self.loaded.get(owner.name) is not owner:
+                return "[FAILED] Plugin changed; refresh tool declarations"
+            if owner.name in self._inflight:
+                return "[UNVERIFIED] Previous invocation of this plugin is still running. Do not retry."
+            if len(self._inflight) >= 4:
+                return "[FAILED] Plugin workers are busy"
+            context = self._context_for(owner)
+            def invoke():
                 nparams = len(inspect.signature(fn).parameters)
-                context = self._context_for(owner)
                 return fn(args, context) if nparams >= 2 else fn(args)
-            pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"plugin-{owner.name}")
-            try:
-                res: Any = pool.submit(invoke).result(timeout=owner.timeout)
-            finally:
-                pool.shutdown(wait=False, cancel_futures=True)
+            future = self._pool.submit(invoke)
+            self._inflight[owner.name] = (future, context)
+            def finished(done):
+                with self._lock:
+                    current = self._inflight.get(owner.name)
+                    if current and current[0] is done:
+                        self._inflight.pop(owner.name, None)
+            future.add_done_callback(finished)
+        try:
+            res = future.result(timeout=owner.timeout)
         except TimeoutError:
-            return f"[FAILED] plugin tool '{name}' timed out after {owner.timeout:g}s"
+            context.cancelled.set()
+            future.cancel()
+            # Running Python cannot be forcibly stopped safely. Block retries
+            # until it actually exits; the restricted bridge is revoked.
+            return (f"[UNVERIFIED] Plugin '{name}' timed out after {owner.timeout:g}s; "
+                    "execution may still be active. Do not retry; inspect effects.")
         except Exception as e:
-            traceback.print_exc()
-            return f"[FAILED] plugin tool '{name}' crashed\nREASON: {type(e).__name__}: {e}"
+            return f"[FAILED] plugin tool '{name}' crashed\nREASON: {type(e).__name__}"
         out = res.to_llm() if isinstance(res, ActionResult) else ("" if res is None else str(res))
         out = verify_result(name, args, out)
         self.ctx.log(f"{name}: {out.splitlines()[0] if out else 'empty result'}")
@@ -349,8 +378,15 @@ class PluginManager:
 
     def stop(self) -> None:
         self._stop.set()
+        with self._lock:
+            for future, context in self._inflight.values():
+                context.cancelled.set()
+            self._pool.shutdown(wait=False, cancel_futures=True)
 
     def remove(self, name: str) -> tuple[bool, str]:
+        with self._lock:
+            if self._inflight:
+                return False, "Wait for active plugins to finish before disabling a plugin."
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", name):
             return False, "Invalid plugin name."
         for cand in (PLUGIN_DIR / f"{name}.py", PLUGIN_DIR / name / "plugin.py"):
