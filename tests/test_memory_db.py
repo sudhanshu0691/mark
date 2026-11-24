@@ -68,3 +68,21 @@ def test_private_context_is_not_loaded(monkeypatch):
     from memory import conversation
     monkeypatch.setattr(conversation, "recent_messages", lambda **kwargs: (_ for _ in ()).throw(AssertionError("private history read")))
     assert conversation.build_turn_context("hello", share_cloud=False) == ([], "")
+
+
+def test_explicit_local_recall_preserves_session_and_avoids_cloud(tmp_path, monkeypatch):
+    from memory import db
+    from core.agents import orchestrator as o
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "recall.db")
+    monkeypatch.setattr(db, "LEGACY_LONG_TERM", tmp_path / "missing-long.json")
+    monkeypatch.setattr(db, "LEGACY_CONVERSATION", tmp_path / "missing-history.json")
+    first = db.start_conversation("first")
+    db.append_conversation_turn("orchid project", "first answer", conversation_id=first)
+    second = db.start_conversation("second")
+    db.append_conversation_turn("orchid project", "private other answer", conversation_id=second)
+    monkeypatch.setattr(o.llm, "load_config", lambda: (_ for _ in ()).throw(AssertionError("cloud accessed")))
+    answer = o.MasterOrchestrator().execute("history search orchid", conversation_id=first,
+        dispatch=lambda *args: None, declarations=lambda: [])
+    assert "first answer" in answer
+    assert "private other answer" not in answer
+    assert db.get_active_conversation()["id"] == second

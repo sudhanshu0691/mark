@@ -9,7 +9,7 @@ from core import brain, llm
 from core.agents import for_tool
 from core.intent import is_conversation, match_local_command
 from core.intelligence.intent import classify_intent, assess_complexity, Complexity, model_role
-from memory.conversation import build_turn_context
+from memory.conversation import build_turn_context, recall_local
 
 @dataclass(frozen=True)
 class Route:
@@ -43,6 +43,9 @@ class MasterOrchestrator:
             return "[FAILED] Empty request."
         if cancelled and cancelled():
             return "RESULT: CANCELLED"
+        recalled = recall_local(text, conversation_id=conversation_id)
+        if recalled is not None:
+            return recalled
         route = select_route(text)
         log(f"[router] {route.kind} / {route.role or 'local'} / {route.complexity}")
 

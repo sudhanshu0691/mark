@@ -42,6 +42,7 @@ class LiveKitAgentWorker:
         def disconnected(*args):
             self._is_running = False
             self._cancel.set()
+            self._pending_text = None
             for task in tuple(self._receivers):
                 task.cancel()
 
@@ -154,19 +155,27 @@ class LiveKitAgentWorker:
                                 await self.speak_text(sentence)
                 consumer = asyncio.create_task(consume())
                 try:
-                    answer = await asyncio.to_thread(
-                        execute_turn, text, dispatch=self.markdown_adapter._dispatch_sync,
-                        declarations=self.markdown_adapter._all_declarations,
-                        conversation_id=conversation_id, cancelled=self._cancel.is_set, on_delta=delta)
+                    try:
+                        answer = await asyncio.to_thread(
+                            execute_turn, text, dispatch=self.markdown_adapter._dispatch_sync,
+                            declarations=self.markdown_adapter._all_declarations,
+                            conversation_id=conversation_id, cancelled=self._cancel.is_set, on_delta=delta)
+                    except Exception as exc:
+                        logger.error("Voice inference failed: %s", type(exc).__name__)
+                        answer = "[FAILED] Voice inference failed."
+                    head = answer.split("\nEXECUTION TRACE:")[0].strip()
+                    if self._cancel.is_set():
+                        head = "[CANCELLED] Voice turn interrupted; any tool effects may already exist."
+                    # Commit the completed turn before waiting for audio delivery.
+                    await asyncio.to_thread(db.append_conversation_turn, text, head,
+                                            channel="voice", conversation_id=conversation_id)
                 finally:
                     await queue.put(None)
-                    await consumer
-                head = answer.split("\nEXECUTION TRACE:")[0].strip()
-                if self._cancel.is_set():
-                    head = "[CANCELLED] Voice turn interrupted; any tool effects may already exist."
-                await asyncio.to_thread(db.append_conversation_turn, text, head,
-                                        channel="voice", conversation_id=conversation_id)
-                if not self._cancel.is_set():
+                    try:
+                        await consumer
+                    except Exception as exc:
+                        logger.warning("Voice delivery failed: %s", type(exc).__name__)
+                if not self._cancel.is_set() and self._is_running:
                     await self.send_text(head)
                     if not streamed:
                         await self.speak_text(head[:1800])
