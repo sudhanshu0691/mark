@@ -867,6 +867,7 @@ class MarkLive:
             if not allowed or allowed == participant_name:
                 raise ValueError("Set LIVEKIT_REMOTE_IDENTITY to the authorized remote participant")
             self._livekit_worker.allowed_identity = allowed
+            self._livekit_worker.desktop_preview_allowed = os.environ.get("MARK_LIVEKIT_DESKTOP_PREVIEW", "0") == "1"
             room = rtc.Room()
             try:
                 await room.connect(livekit_cfg["url"], self._livekit_token)

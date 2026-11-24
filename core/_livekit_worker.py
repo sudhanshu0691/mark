@@ -25,6 +25,8 @@ class LiveKitAgentWorker:
         self._turn_task = None
         self._pending_text = None
         self._cancel = asyncio.Event()
+        self._desktop_preview = None
+        self.desktop_preview_allowed = False
 
     async def start(self, room, participant=None):
         from livekit import rtc
@@ -48,6 +50,8 @@ class LiveKitAgentWorker:
             self._is_running = False
             self._cancel.set()
             self._pending_text = None
+            if self._desktop_preview is not None:
+                asyncio.create_task(self.stop_desktop_preview())
             for task in tuple(self._receivers):
                 task.cancel()
 
@@ -193,8 +197,14 @@ class LiveKitAgentWorker:
                 consumer = asyncio.create_task(consume())
                 try:
                     try:
-                        answer = await asyncio.to_thread(
-                            execute_turn, text, dispatch=self.markdown_adapter._dispatch_sync,
+                        command = text.strip().casefold().rstrip(".!?")
+                        if command == "stop desktop preview":
+                            answer = await self.stop_desktop_preview()
+                        elif command == "start desktop preview":
+                            answer = await self.start_desktop_preview()
+                        else:
+                            answer = await asyncio.to_thread(
+                                execute_turn, text, dispatch=self.markdown_adapter._dispatch_sync,
                             declarations=self.markdown_adapter._all_declarations,
                             conversation_id=conversation_id, cancelled=self._cancel.is_set, on_delta=delta)
                     except Exception as exc:
@@ -226,6 +236,26 @@ class LiveKitAgentWorker:
                         await self.speak_text("The full response is available in text.")
             finally:
                 lock.release()
+
+    async def start_desktop_preview(self):
+        from core.desktop_preview import DesktopPreview
+        identity = getattr(self, "allowed_identity", None)
+        if not self.desktop_preview_allowed or not self._is_running or not self._room or not identity:
+            return "[FAILED] Desktop preview is disabled or disconnected."
+        monitor = getattr(self.markdown_adapter, "screen_monitor", None)
+        if monitor is None:
+            return "[FAILED] Local screen monitor unavailable."
+        if self._desktop_preview is not None and self._desktop_preview.running:
+            return "[DONE] Desktop preview already active."
+        self._desktop_preview = DesktopPreview(self._room, identity, monitor.latest_frame)
+        self._desktop_preview.start()
+        return "[DONE] Desktop preview started for the authorized participant."
+
+    async def stop_desktop_preview(self):
+        preview, self._desktop_preview = self._desktop_preview, None
+        if preview is not None:
+            await preview.stop()
+        return "[DONE] Desktop preview stopped."
 
     async def _publish_text(self, text, topic):
         identity = getattr(self, "allowed_identity", None)
@@ -271,6 +301,7 @@ class LiveKitAgentWorker:
         self._is_running = False
         self._pending_text = None
         await self.interrupt()
+        await self.stop_desktop_preview()
         for task in tuple(self._receivers):
             task.cancel()
         if self._receivers:
