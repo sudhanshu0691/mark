@@ -92,9 +92,10 @@ def _windows_api():
     return kernel, userenv, advapi
 
 
-def _require(value):
+def _require(value, operation):
     if not value:
-        raise c.WinError(c.get_last_error())
+        error = c.WinError(c.get_last_error())
+        raise OSError(f"{operation}: {error}")
 
 
 def _stage(root, source, payload):
@@ -130,7 +131,7 @@ def _job(kernel):
         win32job.SetInformationJobObject(job, win32job.JobObjectExtendedLimitInformation, settings)
         # CPU rate control: enable and cap at 25% of the system's available CPU.
         cpu = (w.DWORD * 2)(0x1 | 0x4, 2500)
-        _require(kernel.SetInformationJobObject(int(job), 15, c.byref(cpu), c.sizeof(cpu)))
+        _require(kernel.SetInformationJobObject(int(job), 15, c.byref(cpu), c.sizeof(cpu)), "Set CPU limit")
         return job
     except BaseException:
         job.Close()
@@ -150,12 +151,12 @@ def _run_process(kernel, root, sid, timeout, cancelled):
     startup = _Startup()
     initialized = False
     try:
-        _require(kernel.SetHandleInformation(int(reader), 1, 0))
+        _require(kernel.SetHandleInformation(int(reader), 1, 0), "Restrict pipe inheritance")
         size = c.c_size_t()
         kernel.InitializeProcThreadAttributeList(None, 2, 0, c.byref(size))
         attributes = c.create_string_buffer(size.value)
         startup.attributes = c.cast(attributes, c.c_void_p)
-        _require(kernel.InitializeProcThreadAttributeList(startup.attributes, 2, 0, c.byref(size)))
+        _require(kernel.InitializeProcThreadAttributeList(startup.attributes, 2, 0, c.byref(size)), "Initialize process attributes")
         initialized = True
 
         capabilities = _Capabilities(sid, None, 0, 0)
@@ -163,7 +164,7 @@ def _run_process(kernel, root, sid, timeout, cancelled):
         for key, value in ((0x00020009, capabilities), (0x00020002, handles)):
             _require(kernel.UpdateProcThreadAttribute(
                 startup.attributes, 0, key, c.byref(value), c.sizeof(value), None, None,
-            ))
+            ), f"Set process attribute {key:#x}")
         startup.cb = c.sizeof(startup)
         startup.flags = 0x100  # STARTF_USESTDHANDLES
         startup.stdin = startup.stdout = startup.stderr = int(writer)
@@ -172,7 +173,17 @@ def _run_process(kernel, root, sid, timeout, cancelled):
             [str(exe), "-I", "-S", "-B", "worker.py", "plugin.py", "request.json"],
         ))
         windows = os.environ.get("SystemRoot", r"C:\Windows")
-        environment = c.create_unicode_buffer(f"PATH={windows}\\System32\0SystemRoot={windows}\0\0")
+        # These Windows directory variables are used by the lowbox loader.
+        # Application environment, PATH and credential variables are excluded.
+        system_keys = {
+            "SYSTEMDRIVE", "SYSTEMROOT", "WINDIR", "PROGRAMDATA", "PROGRAMFILES", "PROGRAMFILES(X86)",
+            "ALLUSERSPROFILE", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "PUBLIC", "COMSPEC",
+        }
+        system = {key.upper(): value for key, value in os.environ.items() if key.upper() in system_keys}
+        system.update(PATH=str(Path(windows) / "System32"), SYSTEMROOT=windows, TEMP=str(root), TMP=str(root))
+        environment = c.create_unicode_buffer(
+            "\0".join(f"{key}={value}" for key, value in sorted(system.items())) + "\0\0",
+        )
         job = _job(kernel)
         if cancelled.is_set():
             return "[CANCELLED] Plugin cancelled before launch."
@@ -180,10 +191,10 @@ def _run_process(kernel, root, sid, timeout, cancelled):
         _require(kernel.CreateProcessW(
             str(exe), command, None, None, True, 0x08080404, environment, str(root),
             c.byref(startup), c.byref(info),
-        ))
+        ), "Create AppContainer process")
         writer.Close()
         writer = None
-        _require(kernel.AssignProcessToJobObject(int(job), info.process))
+        _require(kernel.AssignProcessToJobObject(int(job), info.process), "Assign resource-limited Job")
         if kernel.ResumeThread(info.thread) == 0xFFFFFFFF:
             raise c.WinError(c.get_last_error())
 
@@ -209,7 +220,7 @@ def _run_process(kernel, root, sid, timeout, cancelled):
             cancelled.wait(0.02)
 
         status = w.DWORD()
-        _require(kernel.GetExitCodeProcess(info.process, c.byref(status)))
+        _require(kernel.GetExitCodeProcess(info.process, c.byref(status)), "Read worker exit status")
         if status.value != 0:
             return "[FAILED] AppContainer plugin failed."
         decoded = json.loads(output)
@@ -250,7 +261,7 @@ def run_sandboxed(source, name, args, timeout, cancelled):
             raise OSError(f"AppContainer profile creation failed ({status:#x}).")
         sid_text = w.LPWSTR()
         try:
-            _require(advapi.ConvertSidToStringSidW(sid, c.byref(sid_text)))
+            _require(advapi.ConvertSidToStringSidW(sid, c.byref(sid_text)), "Format AppContainer SID")
             with TemporaryDirectory(prefix="mark-appcontainer-") as directory:
                 root = Path(directory)
                 _stage(root, source, payload)
