@@ -53,3 +53,16 @@ def test_specialist_handoff_tracks_failure_without_retry():
     assert agent.execute("web_search", {}).startswith("[FAILED]")
     assert any("handoff" in msg for msg in logs)
     assert "web_search: [FAILED]" in agent.guidance()
+
+
+def test_cancellation_reaches_agent_gateway(monkeypatch):
+    monkeypatch.setattr(o.llm, "load_config", lambda: {})
+    monkeypatch.setattr(o, "build_turn_context", lambda *a, **k: ([], ""))
+    monkeypatch.setattr(o, "is_conversation", lambda _: False)
+    seen = []
+    monkeypatch.setattr(o.llm, "chat_tools", lambda *a, **k: seen.append(k["cancelled"]) or {})
+    monkeypatch.setattr(o.brain, "run_goal", lambda **kwargs: kwargs["chat"]([], []) or "[DONE]")
+    cancel = lambda: False
+    assert o.MasterOrchestrator().execute("Research renewable energy", dispatch=lambda *a: "[DONE]",
+                                           declarations=lambda: [], cancelled=cancel) == "[DONE]"
+    assert seen == [cancel]

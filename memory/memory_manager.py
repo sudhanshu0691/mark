@@ -192,6 +192,10 @@ def format_memory_for_prompt(memory: dict | None) -> str:
     return result + "\n"
 
 def remember(key: str, value: str, category: str = "notes") -> str:
+    from memory.db import validate_fact
+    error = validate_fact(key, value)
+    if error:
+        return f"[FAILED] {error}"
     valid = {"identity", "preferences", "projects", "relationships", "wishes", "notes"}
     if category not in valid:
         category = "notes"

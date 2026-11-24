@@ -144,7 +144,8 @@ PROMPT_PATH     = BASE_DIR / "core" / "prompt.txt"
 # Gemini Live API model ID. Native audio keeps transcription and tool turns
 # compatible with the current Live SDK configuration.
 from core import llm as _llm_config
-LIVE_MODEL = _llm_config.load_config().get("gemini", {}).get("live_model", "")
+def _live_model():
+    return _llm_config.load_config().get("gemini", {}).get("live_model", "")
 CHANNELS            = 1
 SEND_SAMPLE_RATE    = 16000
 RECEIVE_SAMPLE_RATE = 24000
@@ -1175,7 +1176,7 @@ class MarkLive:
             _llm_route = "The configured text model route could not be read."
         model_ctx = (
             "[MODEL TRANSPARENCY]\n"
-            f"This live voice conversation is handled by Google Gemini ({LIVE_MODEL}).\n"
+            f"This live voice conversation is handled by Google Gemini ({_live_model()}).\n"
             f"{_llm_route}\n"
             "If asked which LLM you are running on, answer accurately and briefly. "
             "Distinguish this live voice model from the separate text/code task route; "
@@ -1245,13 +1246,16 @@ class MarkLive:
             category = args.get("category", "notes")
             key      = args.get("key", "")
             value    = args.get("value", "")
-            if key and value:
+            from memory.db import validate_fact
+            error = validate_fact(key, value)
+            if not error:
                 update_memory({category: {key: {"value": value}}})
             if not self.ui.muted:
                 self.ui.set_state("LISTENING")
             return gtypes.FunctionResponse(
                 id=fc.id, name=name,
-                response={"result": "ok", "silent": True}
+                response={"result": f"[FAILED] {error}" if error else "ok",
+                          "silent": not bool(error)}
             )
 
         loop   = asyncio.get_event_loop()
@@ -2211,7 +2215,7 @@ class MarkLive:
                 )
 
                 async with (
-                    client.aio.live.connect(model=LIVE_MODEL, config=config) as session,
+                    client.aio.live.connect(model=_live_model(), config=config) as session,
                     asyncio.TaskGroup() as tg,
                 ):
                     connected = True
@@ -2316,7 +2320,7 @@ class MarkLive:
                     self._live_input_ready = False
                     self.ui.write_log(
                         "ERR: Gemini Live rejected the audio configuration "
-                        f"(model={LIVE_MODEL}; input=PCM s16le mono "
+                        f"(model={_live_model()}; input=PCM s16le mono "
                         f"{SEND_SAMPLE_RATE}Hz; mime=audio/pcm;rate={SEND_SAMPLE_RATE}). "
                         "Voice is disabled until MARK is restarted; typed commands remain available."
                     )

@@ -121,18 +121,38 @@ def validate_arguments(declaration, args):
         return "Unknown tool."
     if not isinstance(args, dict):
         return "Arguments must be an object."
-    schema = declaration.get("parameters") or {}
-    fields = schema.get("properties") or {}
-    for key in schema.get("required", []):
-        if key not in args:
-            return f"Missing required argument {key}."
     types = {"STRING": str, "BOOLEAN": bool, "INTEGER": int, "NUMBER": (int, float),
              "ARRAY": list, "OBJECT": dict}
-    for key, value in args.items():
-        if key not in fields:
-            return f"Unknown argument {key}."
-        kind = str(fields[key].get("type", "")).upper()
+
+    def validate(schema, value, path, depth=0, strict=False):
+        if depth > 32 or not isinstance(schema, dict):
+            return f"Invalid schema for {path}."
+        kind = str(schema.get("type", "")).upper()
         if kind in types and (not isinstance(value, types[kind]) or
                 (kind in {"NUMBER", "INTEGER"} and isinstance(value, bool))):
-            return f"Invalid type for {key}."
-    return ""
+            return f"Invalid type for {path}."
+        if "enum" in schema and value not in schema["enum"]:
+            return f"Invalid value for {path}."
+        if isinstance(value, dict):
+            fields = schema.get("properties") or {}
+            for key in schema.get("required", []):
+                if key not in value:
+                    missing = f"{path}.{key}" if path else key
+                    return f"Missing required argument {missing}."
+            for key, item in value.items():
+                child = f"{path}.{key}" if path else str(key)
+                if key not in fields:
+                    if strict or schema.get("additionalProperties") is False:
+                        return f"Unknown argument {child}."
+                    continue
+                error = validate(fields[key], item, child, depth + 1)
+                if error:
+                    return error
+        elif isinstance(value, list) and isinstance(schema.get("items"), dict):
+            for index, item in enumerate(value):
+                error = validate(schema["items"], item, f"{path}[{index}]", depth + 1)
+                if error:
+                    return error
+        return ""
+
+    return validate(declaration.get("parameters") or {}, args, "", strict=True)
