@@ -56,7 +56,9 @@ jobs:
           uv lock --check
           uv sync --locked --python 3.11 --extra livekit --extra vision
       - name: Run complete Windows test suite
-        run: uv run --no-sync python -m pytest tests -ra --junitxml=test-results.xml --cov=core --cov=memory --cov-report=term-missing --cov-report=xml:coverage.xml --cov-fail-under=50
+        run: uv run --no-sync python -m pytest tests -ra --junitxml=test-results.xml --cov=core --cov=memory --cov=actions --cov=plugins --cov=ui --cov=vision_department --cov-report=term --cov-report=xml:coverage.xml
+      - name: Enforce core and memory coverage floor
+        run: uv run --no-sync coverage report --include="core/*,memory/*" --fail-under=50
       - name: Audit installed Windows dependencies
         run: uvx pip-audit --path .venv/Lib/site-packages
       - name: Upload test and coverage reports

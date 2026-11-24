@@ -42,6 +42,7 @@ dependencies = [
     "pyperclip",
     "pygetwindow",
     "pdfplumber",
+    "pypdfium2>=5.14,<6",
     "pypdf>=7.1.1,<8",
     "python-docx",
     "python-pptx",

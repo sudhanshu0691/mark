@@ -35,6 +35,8 @@ WANT = [
     ("pyperclip", "clipboard", False),
     ("pptx", "PowerPoint (ppt_studio)", False),
     ("docx", "Word", False),
+    ("pypdf", "PDF editing", False),
+    ("pypdfium2", "PDF page rendering", False),
     ("pydub", "audio editing", True),
     ("playwright", "browser automation", True),
     ("pytesseract", "OCR binding", True),
@@ -107,6 +109,47 @@ def verify() -> tuple[list[str], list[str]]:
     return req, opt
 
 
+def report_capabilities():
+    import shutil
+    import sqlite3
+
+    from actions.office_files import OFFICE_APPS, libreoffice_path, office_available
+
+    for program in sorted(set(OFFICE_APPS.values())):
+        print(f"{program}: {'registered' if office_available(program) else 'optional, not detected'}")
+    for label, available in (
+        ("LibreOffice", libreoffice_path()), ("Tesseract OCR", shutil.which("tesseract")),
+        ("FFmpeg", shutil.which("ffmpeg")),
+    ):
+        print(f"{label}: {'found' if available else 'optional, not detected'}")
+    try:
+        import sounddevice
+        devices = sounddevice.query_devices()
+        inputs = sum(item["max_input_channels"] > 0 for item in devices)
+        outputs = sum(item["max_output_channels"] > 0 for item in devices)
+        print(f"Audio devices: {inputs} input, {outputs} output")
+    except Exception as exc:
+        print(f"Audio discovery unavailable ({type(exc).__name__})")
+    try:
+        import mss
+        with mss.MSS() as capture:
+            print(f"Displays detected: {max(0, len(capture.monitors) - 1)}")
+    except Exception as exc:
+        print(f"Display discovery unavailable ({type(exc).__name__})")
+    with sqlite3.connect(":memory:") as database:
+        try:
+            database.execute("CREATE VIRTUAL TABLE test USING fts5(value)")
+            print("SQLite memory: FTS5 available")
+        except sqlite3.Error:
+            print("SQLite memory: fallback retrieval available")
+    try:
+        from core.secrets import get_secret
+        for provider in ("groq", "gemini"):
+            print(f"{provider.title()} credential: {'configured' if get_secret(provider) else 'not configured'}")
+    except Exception as exc:
+        print(f"Credential store could not be queried ({type(exc).__name__})")
+
+
 def doctor() -> int:
     print("=== MARK preflight ===")
     print(f"python: {sys.version.split()[0]}  exe: {sys.executable}")
@@ -126,7 +169,11 @@ def doctor() -> int:
     cfg = HERE / "config"
     print(f"\nconfig/api_keys.json: {'legacy profile present' if (cfg / 'api_keys.json').exists() else 'optional; OS credential store is preferred'}")
     print(f"plugins/: {len(list((HERE / 'plugins').glob('*.py')))} python files")
-    return 0 if not req else 1
+    report_capabilities()
+    supported = (3, 11) <= sys.version_info[:2] < (3, 13) and sys.maxsize > 2**32
+    if not supported:
+        print("MARK requires 64-bit Python 3.11 or 3.12.")
+    return 0 if not req and supported else 1
 
 
 def test_gemini() -> int:

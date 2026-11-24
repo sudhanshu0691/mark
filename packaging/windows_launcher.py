@@ -16,7 +16,7 @@ def main():
         console = scripts / "python.exe"
         if not console.is_file() or not python.is_file() or not program.is_file():
             return 1
-        return subprocess.run([str(console), "-c", "import main"], cwd=root, check=False).returncode
+        return subprocess.run([str(console), str(program), "--check-startup"], cwd=root, check=False, timeout=60).returncode
     if not python.is_file():
         import ctypes
 

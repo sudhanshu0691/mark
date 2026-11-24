@@ -7,6 +7,10 @@ if not exist ".venv\Scripts\python.exe" (
     exit /b 1
 )
 if not exist "data" mkdir "data"
+if /i "%~1"=="--check" (
+    ".venv\Scripts\python.exe" check_env.py
+    exit /b
+)
 if /i "%~1"=="--console" (
     ".venv\Scripts\python.exe" main.py
     exit /b

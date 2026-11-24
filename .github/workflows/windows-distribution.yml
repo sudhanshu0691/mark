@@ -47,6 +47,8 @@ jobs:
           Push-Location smoke/MARK
           cmd.exe /d /c setup_windows.bat --non-interactive
           if ($LASTEXITCODE -ne 0) { throw "Packaged setup failed" }
+          cmd.exe /d /c run_mark.bat --check
+          if ($LASTEXITCODE -ne 0) { throw "Runtime diagnostic failed" }
           $launcher = Start-Process .\MARK.exe -ArgumentList '--check' -Wait -PassThru
           if ($launcher.ExitCode -ne 0) { throw "Launcher check failed with $($launcher.ExitCode)" }
           Pop-Location
