@@ -334,6 +334,46 @@ def _run(args):
                   "valid: create read list add_slide add_text add_image delete_slide duplicate rename save_as")
 
 
+def _text_overflows(shape):
+    import os
+    from math import ceil
+
+    from PIL import ImageFont
+    from pptx.enum.text import MSO_AUTO_SIZE
+
+    if not shape.has_text_frame or not shape.text.strip():
+        return False
+    frame = shape.text_frame
+    if frame.auto_size in {MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT, MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE}:
+        return False
+    available_width = (shape.width - frame.margin_left - frame.margin_right) / 12700
+    available_height = (shape.height - frame.margin_top - frame.margin_bottom) / 12700
+    if min(available_width, available_height) <= 0:
+        return True
+
+    height = 0.0
+    for paragraph in frame.paragraphs:
+        sizes = [run.font.size.pt for run in paragraph.runs if run.font.size]
+        size = max(sizes, default=paragraph.font.size.pt if paragraph.font.size else 18)
+        windows_font = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts" / "arial.ttf"
+        try:
+            font = ImageFont.truetype(str(windows_font) if windows_font.is_file() else "DejaVuSans.ttf",
+                                      max(1, round(size * 2)))
+        except OSError:
+            font = ImageFont.load_default(size=max(1, round(size * 2)))
+        lines = 0
+        for line in paragraph.text.split("\v"):
+            width = font.getlength(line) / 2
+            if frame.word_wrap is False and width > available_width:
+                return True
+            lines += max(1, ceil(width / available_width))
+        spacing = paragraph.line_spacing
+        line_height = spacing.pt if hasattr(spacing, "pt") else size * (spacing or 1.2)
+        height += lines * line_height
+        height += sum(value.pt for value in (paragraph.space_before, paragraph.space_after) if value)
+    return height > available_height + 2
+
+
 def _advanced(path, action, args):
     from pptx.chart.data import CategoryChartData
     from pptx.enum.chart import XL_CHART_TYPE
@@ -357,7 +397,16 @@ def _advanced(path, action, args):
         ]
         if issues:
             return failed("Shapes extend beyond the slide canvas", ", ".join(issues[:20]))
-        return done("All slide shapes fit within the canvas", evidence=f"{len(prs.slides)} slides")
+        overflow = [
+            f"Slide {index}, shape {shape.name}"
+            for index, slide in enumerate(prs.slides, 1)
+            for shape in slide.shapes
+            if _text_overflows(shape)
+        ]
+        if overflow:
+            return failed("Estimated text overflow", ", ".join(overflow[:20]))
+        return done("Slide shapes fit the canvas and text fits the estimated bounds",
+                    evidence=f"{len(prs.slides)} slides")
 
     index = int(args.get("index", 1))
     if not 1 <= index <= len(prs.slides):

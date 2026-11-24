@@ -786,6 +786,8 @@ class MarkLive:
         self._loop                = None
         self._is_speaking         = False
         self._speaking_lock       = threading.Lock()
+        from core.voice_stream import PlaybackBargeIn
+        self._barge_in = PlaybackBargeIn(SEND_SAMPLE_RATE, RECEIVE_SAMPLE_RATE)
         self._interrupted          = False   # True while draining audio after user interrupt
         self._ask_after_interrupt  = False  # ask what happened after the cancelled turn ends
         self._cancel_requested     = False   # True when user wants current tool/thinking cancelled
@@ -1014,7 +1016,7 @@ class MarkLive:
         elif not self.ui.muted:
             self.ui.set_state("LISTENING")
 
-    def interrupt(self) -> None:
+    def interrupt(self, *, spoken=False) -> None:
         """Stop MARK mid-speech: drain queued audio and open mic immediately."""
         self._interrupted = True
         self._cancel_requested = True
@@ -1024,7 +1026,7 @@ class MarkLive:
             asyncio.run_coroutine_threadsafe(worker.interrupt(), self._loop)
         if self._active_task_id is not None:
             TASKS.request_cancel(self._active_task_id)
-        self._ask_after_interrupt = bool(self.session)
+        self._ask_after_interrupt = bool(self.session) and not spoken
         # Cancel in-flight tool/thinking task if any
         t = self._current_tool_task
         if t is not None and not t.done():
@@ -1602,8 +1604,12 @@ class MarkLive:
     async def _listen_audio(self):
         loop = asyncio.get_event_loop()
 
-        def enqueue_audio(data: bytes) -> None:
-            if self.out_queue is None:
+        def enqueue_audio(data: bytes, interrupt: bool = False) -> None:
+            if self.ui.muted or self.out_queue is None:
+                return
+            if interrupt and self._is_speaking:
+                self.interrupt(spoken=True)
+            if not data:
                 return
             try:
                 self.out_queue.put_nowait(
@@ -1625,12 +1631,10 @@ class MarkLive:
                         self.ui.set_level(min(1.0, rms * 9.0))
                 except Exception:
                     pass
-            if not mark_speaking and not self.ui.muted:
-                data = indata.tobytes()
-                loop.call_soon_threadsafe(
-                    enqueue_audio,
-                    data,
-                )
+            if not self.ui.muted:
+                data, interrupt = self._barge_in.microphone(indata.tobytes(), playing=mark_speaking)
+                if data:
+                    loop.call_soon_threadsafe(enqueue_audio, data, interrupt)
 
         delay = 0.5
         while True:
@@ -1820,9 +1824,9 @@ class MarkLive:
 
                 # Batch all immediately-available chunks into one write to reduce
                 # thread-pool round-trips (was one asyncio.to_thread per 50ms slice).
-                # Cap at ~200 ms so interrupt() still stops audio within ~200 ms.
+                # Cap at one short chunk so speech interruption can stop promptly.
                 batch = bytearray(chunk)
-                while len(batch) < 9600:   # 9600 bytes ≈ 200 ms at 24 kHz / 16-bit mono
+                while len(batch) < 2400:   # Keep at most about 50 ms queued in the device.
                     try:
                         batch.extend(self.audio_in_queue.get_nowait())  # type: ignore
                     except asyncio.QueueEmpty:
@@ -1835,7 +1839,9 @@ class MarkLive:
                 except Exception:
                     pass
                 try:
-                    await asyncio.to_thread(stream.write, bytes(batch))
+                    samples = bytes(batch)
+                    self._barge_in.playback(samples)
+                    await asyncio.to_thread(stream.write, samples)
                 except (RuntimeError, asyncio.CancelledError):
                     break   # executor shutting down — exit cleanly
         except Exception as e:

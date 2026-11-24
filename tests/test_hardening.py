@@ -424,3 +424,62 @@ def test_recovery_claim_replays_only_known_reads(tmp_path, monkeypatch):
     assert resumed.claim_recovered_read(1) == "system_status"
     assert resumed.claim_recovered_read(1) is None
     assert TaskManager(database=database).claim_recovered_read(1) is None
+
+
+def test_recovered_workflow_keeps_completed_actions_and_blocks_uncertain_writes(
+    tmp_path, monkeypatch
+):
+    from core.agents.recovery import WorkflowJournal
+    from core.agents.specialist import SpecialistExecutor
+    from core.agents.workflow import Outcome, Workflow
+    from plugins.ppt_studio import DECLARATION
+
+    monkeypatch.setattr(
+        llm, "chat_raw", lambda *args, **kwargs: {"content": "Independent analysis"}
+    )
+    graph = {
+        "tasks": [
+            {
+                "id": "done",
+                "agent": "presentations",
+                "tool": "ppt_studio",
+                "arguments": '{"action":"notes","path":"private.pptx","text":"first"}',
+            },
+            {
+                "id": "interrupted",
+                "agent": "presentations",
+                "tool": "ppt_studio",
+                "arguments": '{"action":"delete_slide","path":"private.pptx","index":1}',
+            },
+            {
+                "id": "dependent",
+                "agent": "reasoning",
+                "depends_on": ["interrupted"],
+                "instruction": "Report",
+            },
+            {"id": "independent", "agent": "reasoning", "instruction": "Check status"},
+        ]
+    }
+    path = tmp_path / "workflow.db"
+    first = WorkflowJournal(path)
+    identifier = first.create(graph)
+    assert b"private.pptx" not in b"".join(
+        file.read_bytes() for file in tmp_path.glob("workflow.db*")
+    )
+    first.write(
+        running="interrupted",
+        outcomes={"done": Outcome("DONE", "Verified")},
+        status="paused",
+    )
+    second = WorkflowJournal(path)
+    assert identifier in second.recoverable()
+    calls = []
+    specialist = SpecialistExecutor([DECLARATION], lambda *args: calls.append(args))
+    result = Workflow(specialist, None, lambda _: None, second).execute(
+        {}, resume=identifier
+    )
+    assert "Prior side effects are uncertain" in result
+    assert "Independent analysis" in result
+    assert "A dependency did not complete" in result
+    assert calls == []
+    assert identifier not in WorkflowJournal(path).recoverable()

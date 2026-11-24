@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from actions.office_files import convert_pdf, edit_excel_native, libreoffice_path, office_available, permitted, save_verified
+from actions.office_files import convert_pdf, edit_excel_native, edit_open_workbook, libreoffice_path, office_available, permitted, save_verified
 from core.result import done, failed
 
 NAME = "excel"
@@ -59,6 +59,7 @@ DECLARATION = {
             "index": {"type": "INTEGER"},
             "count": {"type": "INTEGER"},
             "source": {"type": "STRING"},
+            "open_workbook": {"type": "BOOLEAN", "description": "Edit the active desktop Excel workbook after approval, without saving"},
             "source_sheet": {"type": "STRING"},
             "source_range": {"type": "STRING"},
             "destination": {"type": "STRING"},
@@ -605,9 +606,46 @@ def _recalculate(args: dict[str, Any]):
     return done(f"Recalculated {path.name}", evidence=json.dumps({"backup": backup.name, "engine": Path(exe).name}))
 
 
+def _edit_open(args, action):
+    from openpyxl.utils.cell import range_boundaries
+
+    if action not in {"set_cell", "formula", "set_range"}:
+        raise ValueError("Open workbook editing supports set_cell, formula, and set_range.")
+    if not office_available("Excel.Application"):
+        raise RuntimeError("Open workbook editing needs desktop Microsoft Excel.")
+    path = permitted(_path(args.get("path")), write=True)
+    address = args.get("range") if action == "set_range" else args.get("cell")
+    if not address or not re.fullmatch(r"[A-Z]{1,3}[1-9][0-9]*(?::[A-Z]{1,3}[1-9][0-9]*)?", address.upper()):
+        raise ValueError("A bounded Excel address is required.")
+    left, top, right, bottom = range_boundaries(address)
+    if not (1 <= left <= right <= 16_384 and 1 <= top <= bottom <= _MAX_ROWS
+            and (right - left + 1) * (bottom - top + 1) <= 1000):
+        raise ValueError("The range is invalid or too large.")
+    if action == "set_range":
+        rows = args.get("data") or []
+        if len(rows) != bottom - top + 1 or any(
+            not isinstance(row, list) or len(row) != right - left + 1 for row in rows
+        ):
+            raise ValueError("Data dimensions must match the target range.")
+        values = tuple(tuple(row) for row in rows)
+        if len(values) == 1 and len(values[0]) == 1:
+            values = values[0][0]
+    else:
+        if left != right or top != bottom:
+            raise ValueError("This action requires a single cell.")
+        values = args.get("value")
+        if action == "formula" and values and not str(values).startswith("="):
+            values = "=" + str(values)
+    edit_open_workbook(path, args.get("sheet"), address, values)
+    return done(f"Updated {path.name} in the open Excel session",
+                evidence="Cell values verified in Excel. The workbook remains open with unsaved edits.")
+
+
 def run(args: dict[str, Any], ctx):
     action = str(args.get("action", "inspect")).strip().lower()
     try:
+        if args.get("open_workbook"):
+            return _edit_open(args, action)
         if action == "recalculate":
             return _recalculate(args)
         if action == "pivot":

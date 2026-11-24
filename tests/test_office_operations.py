@@ -134,3 +134,37 @@ def test_document_cloud_requires_outbound_approval(tmp_path, monkeypatch):
     generate.assert_not_called()
     assert file_processor(args, authorize_cloud=lambda path: path == source) == "Summary"
     generate.assert_called_once()
+
+
+def test_powerpoint_rejects_text_that_overflows_fixed_shape(tmp_path):
+    from pptx import Presentation
+    from pptx.enum.text import MSO_AUTO_SIZE
+    from pptx.util import Inches
+
+    deck = Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[6])
+    box = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(1), Inches(0.3))
+    box.text_frame.auto_size = MSO_AUTO_SIZE.NONE
+    box.text = "This is a multiline heading that greatly exceeds the available fixed text area."
+    path = tmp_path / "overflow.pptx"
+    deck.save(path)
+    result = ppt_studio.run({"action": "validate", "path": str(path)}, None).to_llm()
+    assert result.startswith("[FAILED]") and "overflow" in result
+
+
+def test_editing_open_excel_uses_explicit_approval_policy(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    from core.risk import requires_confirmation
+
+    path = tmp_path / "open.xlsx"
+    path.touch()
+    service = Mock()
+    monkeypatch.setattr(excel, "edit_open_workbook", service)
+    monkeypatch.setattr(excel, "office_available", lambda _: True)
+    args = {"action": "set_range", "path": str(path), "range": "A1:B1",
+            "data": [["one", "two"]], "open_workbook": True}
+    assert requires_confirmation("excel", args)
+    result = excel.run(args, None).to_llm()
+    assert result.startswith("[DONE]") and "unsaved" in result
+    service.assert_called_once_with(path.resolve(), None, "A1:B1", (("one", "two"),))

@@ -16,6 +16,10 @@ def learn_explicit_preference(text):
         if match:
             value = match.group(1)
             if redact_text(value) == value:
+                if key == "editor":
+                    value = _EDITORS.get(value.casefold(), value)
+                if key == "reply_style" and value.casefold() == "brief":
+                    value = "concise"
                 db.upsert_fact(category, key, {"हिंदी": "hindi", "अंग्रेजी": "english",
                                                "हिंग्लिश": "hinglish"}.get(value, value.casefold()), source="user_explicit")
                 return True
@@ -33,6 +37,17 @@ def handle_memory_command(text):
     from memory import db
 
     normalized = text.strip()
+    history = re.fullmatch(r"history (project|note|preference)\s+(.+)", normalized, re.I)
+    if history:
+        category = {"project": "projects", "note": "notes", "preference": "preferences"}[history[1].lower()]
+        key = " ".join(history[2].casefold().strip(" ?").split())
+        if category == "preferences":
+            key = key.replace(" ", "_")
+        revisions = db.fact_history(category, key)
+        return "[LOCAL MEMORY] " + (
+            "\n".join(f"{updated}  {value} ({source})" for value, source, updated in revisions)
+            if revisions else "No prior values."
+        )
     recall = re.fullmatch(r"(?:recall|show saved|yaad dilao)\s+(project|note|preference)\s+(.+)", normalized, re.I)
     if recall:
         category = {"project": "projects", "note": "notes", "preference": "preferences"}[recall[1].lower()]

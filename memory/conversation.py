@@ -255,12 +255,21 @@ def relevant_facts(query, memory, limit=6):
             if entry.get("source") == "user_confirmed":
                 # Individually confirmed potentially sensitive values stay local.
                 continue
-            score = len(terms & _memory_terms(f"{category} {key} {value}"))
+            key_terms = _memory_terms(f"{category} {key}")
+            score = 3 * len(terms & key_terms) + len(terms & _memory_terms(value))
             if score or category == "preferences" and key in {"reply_style", "reply_language"}:
                 matches.append((score, category, key, value))
     matches.sort(key=lambda row: (-row[0], row[1], row[2]))
-    return [{"category": category, "key": key, "value": value}
-            for _, category, key, value in matches[:limit]]
+    selected = []
+    seen = set()
+    for _, category, key, value in matches:
+        fingerprint = (category, " ".join(value.casefold().split()))
+        if fingerprint not in seen:
+            seen.add(fingerprint)
+            selected.append({"category": category, "key": key, "value": value})
+        if len(selected) >= limit:
+            break
+    return selected
 
 
 def build_turn_context(query, *, conversation_id=None, share_cloud=False):

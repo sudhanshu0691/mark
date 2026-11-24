@@ -10,10 +10,11 @@ logger = logging.getLogger(__name__)
 
 
 class DesktopVideo:
-    def __init__(self, room, identity, monitor, resolution, on_active):
+    def __init__(self, room, identity, monitor, resolution, on_active, *, window=None):
         self.room = room
         self.identity = identity
         self.monitor = monitor
+        self._window = window
         self.width, self.height = (1920, 1080) if resolution == 1080 else (1280, 720)
         self.on_active = on_active
         self._executor = ThreadPoolExecutor(
@@ -37,13 +38,16 @@ class DesktopVideo:
         from mss import MSS
         from PIL import Image, ImageOps
 
-        if self._capture is None:
-            self._capture = MSS()
-        monitors = self._capture.monitors
-        if not 1 <= self.monitor < len(monitors):
-            raise ValueError("Selected monitor is unavailable.")
-        shot = self._capture.grab(monitors[self.monitor])
-        image = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+        if self._window is not None:
+            image = self._window.frame()
+        else:
+            if self._capture is None:
+                self._capture = MSS()
+            monitors = self._capture.monitors
+            if not 1 <= self.monitor < len(monitors):
+                raise ValueError("Selected monitor is unavailable.")
+            shot = self._capture.grab(monitors[self.monitor])
+            image = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
         if image.size != (self.width, self.height):
             image = ImageOps.pad(
                 image, (self.width, self.height), Image.Resampling.BILINEAR
@@ -66,6 +70,8 @@ class DesktopVideo:
 
     async def stop(self):
         self._stopped.set()
+        if self._window is not None:
+            await asyncio.to_thread(self._window.close)
         if self._task is not None:
             await asyncio.shield(self._task)
 
@@ -134,6 +140,8 @@ class DesktopVideo:
                 try:
                     if source is not None:
                         await source.aclose()
+                    if self._window is not None:
+                        await asyncio.to_thread(self._window.close)
                     await loop.run_in_executor(self._executor, self._close_capture)
                 finally:
                     self._executor.shutdown(wait=False, cancel_futures=True)

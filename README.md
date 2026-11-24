@@ -39,6 +39,12 @@ Gemini Live requires a Gemini credential and network access. SQLite keeps typed 
 
 Set `LIVEKIT_REMOTE_IDENTITY` to the authorized remote identity and enable `MARK_LIVEKIT_DESKTOP_VIDEO=1` on the desktop. In a connected LiveKit session, request **start desktop video 1080p monitor 1** and approve the dialog on the desktop. Use **720p** or another connected monitor number as needed. The header shows **Stop sharing** during the share. Disconnecting ends the share and a new session requires fresh consent. The optional `MARK_LIVEKIT_DESKTOP_PREVIEW=1` enables the lightweight **start desktop preview** command.
 
+On Windows, request **start window video 1080p Exact window title** to share one visible window. The consent dialog shows the selected title. Sharing ends if the window closes, is minimized, or changes its title.
+
+### Recover a workflow
+
+MARK logs a recovery ID after securely saving a delegated workflow. Use **list recovered workflows** and **resume workflow ID** to continue after interruption. Completed steps are kept. An action interrupted before verification is treated as uncertain, and its dependent steps stay blocked.
+
 ### Trusted plugins
 
 MARK verifies bundled plugin fingerprints before importing Python code. Review external plugins before granting them native access. Record approved relative plugin paths and lowercase SHA-256 digests in local `config/trusted_plugins.json`. The digest uses UTF-8 source bytes with CRLF converted to LF. Removing the entry revokes local approval. For isolated Windows plugins, use local `config/sandbox_plugins.json`. Each relative source path maps to an object with `sha256`, a single `tool` declaration, and an optional `timeout` in seconds. The AppContainer can read the staged Python runtime and request, and returns data through a bounded pipe. No host tools, file passthrough, or network capabilities are granted. Removing approval cancels running sandbox work and blocks future execution. MARK blocks untrusted execution if Windows cannot enforce isolation.

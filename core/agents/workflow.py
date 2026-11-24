@@ -73,11 +73,12 @@ class Outcome:
 
 
 class Workflow:
-    def __init__(self, specialist, cancelled, log):
+    def __init__(self, specialist, cancelled, log, journal=None):
         self.specialist = specialist
         self.cancelled = cancelled or (lambda: False)
         self.log = log
         self.attempted = False
+        self.journal = journal
 
     def _validate(self, args):
         raw = args.get("tasks")
@@ -234,15 +235,44 @@ class Workflow:
                 return Outcome(status, safe[:2000])
         return Outcome("UNVERIFIED", safe[:2000])
 
-    def execute(self, args):
+    def execute(self, args, *, resume=None):
         if self.attempted:
             return "[FAILED] This request already executed a delegation graph."
+        from core.agents.recovery import may_retry
+
         try:
-            pending = self._validate(args)
+            snapshot = self.journal.claim(resume) if resume else None
+            pending = self._validate(snapshot["graph"] if snapshot else args)
         except (ValueError, TypeError, RecursionError) as exc:
+            if resume and self.journal.identifier == resume:
+                self.journal.write(
+                    running=self.journal.snapshot.get("running"), status="paused"
+                )
             return f"[FAILED] Invalid delegation graph ({type(exc).__name__}). Correct its tasks and dependencies."
         self.attempted = True
         outcomes = {}
+        if snapshot:
+            outcomes = {
+                key: Outcome(value["status"], value["text"])
+                for key, value in snapshot["outcomes"].items()
+            }
+            interrupted = snapshot.get("running")
+            if (
+                interrupted
+                and interrupted in pending
+                and not may_retry(pending[interrupted])
+            ):
+                outcomes[interrupted] = Outcome(
+                    "UNVERIFIED",
+                    "Execution was interrupted. Prior side effects are uncertain.",
+                )
+            for key in outcomes:
+                pending.pop(key, None)
+        elif self.journal is not None:
+            checkpoint = self.journal.create(args)
+            self.log(f"[workflow] Recovery ID {checkpoint}")
+        if self.journal is not None:
+            self.journal.write(outcomes=outcomes)
         with ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="mark-specialist"
         ) as pool:
@@ -257,6 +287,12 @@ class Workflow:
                     self.log(f"[agent] {task.id}: {AGENTS[task.agent].name}")
                     if self.cancelled():
                         outcomes[task.id] = Outcome("CANCELLED", "Request cancelled.")
+                    elif any(
+                        outcomes[dep].status == "CANCELLED" for dep in task.dependencies
+                    ):
+                        outcomes[task.id] = Outcome(
+                            "CANCELLED", "A dependency is paused."
+                        )
                     elif any(
                         outcomes[dep].status != "DONE" for dep in task.dependencies
                     ):
@@ -278,14 +314,40 @@ class Workflow:
                         elif self.cancelled():
                             outcome = Outcome("CANCELLED", "Request cancelled.")
                         else:
+                            if self.journal is not None:
+                                self.journal.write(running=task.id, outcomes=outcomes)
                             outcome = self._action(task, outcomes)
                     except Exception as exc:
                         outcome = Outcome(
                             "UNVERIFIED" if task.tool else "FAILED", type(exc).__name__
                         )
+                    # A user cancellation can leave the dispatched action in flight.
+                    # Preserve its running marker so it cannot be replayed.
+                    if (
+                        outcome.status == "CANCELLED"
+                        and task.tool
+                        and self.journal is not None
+                        and self.journal.snapshot["running"] == task.id
+                    ):
+                        self.journal.write(
+                            running=task.id, outcomes=outcomes, status="paused"
+                        )
+                        return f"[CANCELLED] Workflow {self.journal.identifier} paused."
                     outcomes[task.id] = outcome
+                    if self.journal is not None:
+                        self.journal.write(outcomes=outcomes)
                     self.log(f"[agent] {task.id}: {outcome.status}")
         statuses = {result.status for result in outcomes.values()}
+        if self.journal is not None:
+            if "CANCELLED" in statuses:
+                outcomes = {
+                    key: value
+                    for key, value in outcomes.items()
+                    if value.status != "CANCELLED"
+                }
+                self.journal.write(outcomes=outcomes, status="paused")
+                return f"[CANCELLED] Workflow {self.journal.identifier} paused."
+            self.journal.write(outcomes=outcomes, status="completed")
         overall = "DONE"
         for status in ("CANCELLED", "FAILED", "UNVERIFIED"):
             if status in statuses:

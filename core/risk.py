@@ -103,6 +103,8 @@ def classify(tool: str, args: dict | None = None) -> str:
     args = args or {}
     cfg = RISK_MAP.get(tool, {})
     action = str(args.get("action") or args.get("mode") or "*").strip().lower().replace("-", "_").replace(" ", "_")
+    if tool == "excel" and args.get("open_workbook") is True:
+        return EXTERNAL
     if tool == "computer_control" and action == "press":
         return LOW if str(args.get("key", "")).strip().lower() in _NAV_KEYS else HIGH
     if tool == "computer_control" and action == "hotkey":

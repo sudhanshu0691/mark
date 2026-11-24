@@ -148,6 +148,44 @@ def _excel_native(source, settings):
             application.Quit()
 
 
+def edit_open_workbook(source, sheet_name, address, values):
+    """Apply a bounded edit to an already-open Excel workbook without saving it."""
+    import pythoncom
+    from win32com.client import GetActiveObject
+
+    pythoncom.CoInitialize()
+    try:
+        excel = GetActiveObject("Excel.Application")
+        source = os.path.normcase(str(source.resolve()))
+        workbook = next((item for item in excel.Workbooks
+                         if os.path.normcase(str(Path(item.FullName).resolve())) == source), None)
+        if workbook is None or workbook.ReadOnly:
+            raise PermissionError("The workbook must be open and writable in desktop Excel.")
+        worksheet = workbook.Worksheets(sheet_name) if sheet_name else workbook.ActiveSheet
+        if worksheet.ProtectContents:
+            raise PermissionError("The selected worksheet is protected.")
+        target = worksheet.Range(address)
+        if target.MergeCells is not False or target.HasArray is not False:
+            raise PermissionError("Merged cells or array formulas cannot be edited together.")
+        previous = target.Formula
+
+        def normalize(value):
+            rows = value if isinstance(value, (tuple, list)) and value and isinstance(value[0], (tuple, list)) else ((value,),)
+            return tuple(tuple(None if cell == "" else cell for cell in row) for row in rows)
+
+        expected = normalize(values)
+        try:
+            target.Formula = values
+            result = normalize(target.Formula)
+            if expected != result:
+                raise ValueError("Excel did not report the requested values.")
+        except Exception:
+            target.Formula = previous
+            raise
+    finally:
+        pythoncom.CoUninitialize()
+
+
 def edit_excel_native(workbook, settings):
     import json
     import sys

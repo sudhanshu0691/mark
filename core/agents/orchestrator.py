@@ -47,6 +47,19 @@ class MasterOrchestrator:
             return "RESULT: CANCELLED"
         import re
 
+        workflow_resume = re.fullmatch(r"resume workflow ([0-9a-f]{12})", text.strip(), re.I)
+        if workflow_resume or text.strip().casefold() == "list recovered workflows":
+            from core.agents.recovery import WorkflowJournal
+
+            journal = WorkflowJournal()
+            try:
+                if workflow_resume:
+                    specialist = SpecialistExecutor(list(declarations()), dispatch, cancelled, log)
+                    return Workflow(specialist, cancelled, log, journal).execute({}, resume=workflow_resume[1].lower())
+                recovered = journal.recoverable()
+                return "Recovered workflows: " + ", ".join(recovered) if recovered else "No recovered workflows."
+            except (OSError, RuntimeError, ValueError) as exc:
+                return f"[FAILED] Workflow recovery unavailable ({type(exc).__name__})."
         resume = re.fullmatch(r"resume task ([0-9]{1,40})", text.strip(), re.I)
         if resume or text.strip().casefold() == "list recovered tasks":
             from core.task_manager import TASKS
@@ -101,12 +114,15 @@ class MasterOrchestrator:
         on_plan()
         registered = list(declarations())
         specialist = SpecialistExecutor(registered, dispatch, cancelled, log)
-        workflow = Workflow(specialist, cancelled, log)
+        workflow = None
         if cfg.get("specialist_workflows") and route.complexity in {"high", "deep"}:
+            from core.agents.recovery import WorkflowJournal
+
             registered.append(DECLARATION)
+            workflow = Workflow(specialist, cancelled, log, WorkflowJournal())
 
         def dispatch_specialist(name, args):
-            if name == DECLARATION["name"] and DECLARATION in registered:
+            if name == DECLARATION["name"] and workflow is not None:
                 return workflow.execute(args)
             return specialist.execute(name, args)
         def chat(messages, decls, system=None):

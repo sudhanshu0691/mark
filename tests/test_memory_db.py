@@ -154,3 +154,19 @@ def test_corroborated_preferences_and_multilingual_topic_search(tmp_path, monkey
     matches = relevant_facts("कोड के लिए कौन सा IDE", db.load_memory_dict())
     assert matches == [{"category": "preferences", "key": "editor", "value": "vs code"}]
     assert db.load_memory_dict()["preferences"]["editor"]["confidence"] == 0.8
+
+
+def test_preference_history_and_forgetting_are_transactional(tmp_path, monkeypatch):
+    from memory import db
+    from memory.learning import handle_memory_command, learn_explicit_preference
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "memory.db")
+    monkeypatch.setattr(db, "LEGACY_LONG_TERM", tmp_path / "old.json")
+    monkeypatch.setattr(db, "LEGACY_CONVERSATION", tmp_path / "old-talk.json")
+    assert learn_explicit_preference("I prefer using Visual Studio Code")
+    assert learn_explicit_preference("I prefer using VS Code")
+    assert not db.fact_history("preferences", "editor")
+    assert learn_explicit_preference("I prefer using Neovim")
+    assert "vs code" in handle_memory_command("history preference editor")
+    assert handle_memory_command("forget editor").startswith("[DONE]")
+    assert not db.fact_history("preferences", "editor")
