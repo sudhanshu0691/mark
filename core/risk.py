@@ -26,7 +26,7 @@ RISK_MAP = {
     "window_manager": {"*": WRITE},
     "code_helper": {"*": WRITE},
     "dev_agent": {"*": WRITE},
-    "file_processor": {"*": WRITE},
+    "file_processor": {"run": EXTERNAL, "*": WRITE},
 }
 
 # Discrete operations required for the deterministic local route.

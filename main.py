@@ -649,8 +649,8 @@ TOOL_DECLARATIONS = [
         "Processes any file that the user has uploaded or dropped onto the interface. "
         "Use this when the user refers to an uploaded file and wants an action on it. "
         "Supports: images (describe/ocr/resize/compress/convert), "
-        "PDFs (summarize/extract_text/to_word), "
-        "Word docs & text files (summarize/fix/reformat/translate), "
+        "PDFs (create, merge, split, rotate, reorder, extract pages, OCR, searchable PDF, image conversion), "
+        "Word docs (create, edit, find_replace, convert to PDF, analyze), "
         "CSV (analyze/stats/filter/sort/convert); for Excel workbooks use the dedicated excel tool, "
         "JSON/XML (validate/format/analyze), "
         "code files (explain/review/fix/optimize/run/document/test), "
@@ -704,7 +704,24 @@ TOOL_DECLARATIONS = [
             "condition": {"type": "STRING",  "description": "Filter condition: equals|contains|gt|lt"},
             "ascending": {"type": "BOOLEAN", "description": "Sort order for CSV sort (default: true)"},
             "save":      {"type": "BOOLEAN", "description": "Save result to file (default: true)"},
-            "destination": {"type": "STRING", "description": "Output folder for archive extract"},
+            "destination": {"type": "STRING", "description": "Output path, or directory for archive extraction"},
+            "sources": {"type": "ARRAY", "items": {"type": "STRING"}},
+            "pages": {"type": "ARRAY", "items": {"type": "INTEGER"}},
+            "degrees": {"type": "INTEGER"},
+            "text": {"type": "STRING"},
+            "title": {"type": "STRING"},
+            "template": {"type": "STRING"},
+            "find": {"type": "STRING"},
+            "replacement": {"type": "STRING"},
+            "header": {"type": "STRING"},
+            "footer": {"type": "STRING"},
+            "page_numbers": {"type": "BOOLEAN"},
+            "blocks": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
+                "type": {"type": "STRING", "description": "heading | paragraph | table | image | page_break"},
+                "text": {"type": "STRING"}, "level": {"type": "INTEGER"}, "style": {"type": "STRING"},
+                "rows": {"type": "ARRAY", "items": {"type": "ARRAY", "items": {"type": "STRING"}}},
+                "path": {"type": "STRING"}, "width": {"type": "NUMBER"},
+            }, "required": ["type"]}},
         },
         "required": []
     }
@@ -1424,9 +1441,21 @@ class MarkLive:
                 if ext in {".xlsx", ".xlsm", ".xls", ".ods"}:
                     result = "[FAILED] Use the dedicated excel tool for workbook inspection, edits, formulas, summaries, and charts."
                 else:
-                    r = await loop.run_in_executor(
-                        None,
-                        lambda: file_processor(parameters=args, player=self.ui, speak=self.speak)
+                    def authorize_file_cloud(path):
+                        request = asyncio.run_coroutine_threadsafe(
+                            self.ui.confirm_action("send file content to the configured cloud provider",
+                                                   {"file": str(path), "action": args.get("action", "auto")}),
+                            loop,
+                        )
+                        try:
+                            return request.result(timeout=125)
+                        except TimeoutError:
+                            request.cancel()
+                            return False
+
+                    r = await asyncio.to_thread(
+                        file_processor, parameters=args, player=self.ui, speak=self.speak,
+                        authorize_cloud=authorize_file_cloud,
                     )
                     result = r or "[UNVERIFIED] The tool returned no output; effect unknown."
 
