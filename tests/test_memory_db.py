@@ -117,3 +117,22 @@ def test_natural_language_local_recall(tmp_path, monkeypatch):
     db.append_conversation_turn("orchid project", "saved answer", conversation_id=cid)
     assert "saved answer" in conversation.recall_local("What did we discuss about orchid?", conversation_id=cid)
     assert conversation.recall_local("Open orchid file", conversation_id=cid) is None
+
+
+def test_preference_learning_and_atomic_updates(tmp_path, monkeypatch):
+    from memory import db, memory_manager as mm
+    from memory.learning import learn_explicit_preference
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "learning.db")
+    monkeypatch.setattr(db, "LEGACY_LONG_TERM", tmp_path / "missing-long.json")
+    monkeypatch.setattr(db, "LEGACY_CONVERSATION", tmp_path / "missing-history.json")
+    db.save_session_summary("retain me")
+    assert learn_explicit_preference("I prefer replies in English")
+    assert learn_explicit_preference("I prefer replies in Hinglish")
+    assert not learn_explicit_preference("I prefer using password=secret")
+    mm.update_memory({"notes":{"topic":"MARK"}})
+    result = db.load_memory_dict()
+    assert result["preferences"]["reply_language"]["value"] == "hinglish"
+    assert result["notes"]["topic"]["value"] == "MARK"
+    assert result["sessions"][0]["summary"] == "retain me"
+    mm.forget("topic")
+    assert db.load_memory_dict()["preferences"]["reply_language"]["value"] == "hinglish"

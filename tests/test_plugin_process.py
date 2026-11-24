@@ -11,3 +11,9 @@ def test_isolated_worker_is_terminated(tmp_path):
     p = tmp_path / "slow.py"
     p.write_text('import time\nMETADATA={"execution":"process"}\nDECLARATION={"name":"slow"}\ndef run(args,ctx): time.sleep(30)\n', encoding="utf-8")
     assert run_isolated(p, "slow", {}, .3, threading.Event()).startswith("[UNVERIFIED]")
+
+
+def test_cancelled_plugin_never_launches(tmp_path):
+    cancel = threading.Event()
+    cancel.set()
+    assert run_isolated(tmp_path / "missing.py", "sample", {}, 10, cancel).startswith("[CANCELLED]")

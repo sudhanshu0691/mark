@@ -107,11 +107,13 @@ def update_memory(memory_update: dict) -> dict:
     if not isinstance(memory_update, dict) or not memory_update:
         return load_memory()
     with _lock:
-        memory = load_memory()
-        if _recursive_update(memory, memory_update):
-            save_memory(memory)
-            print(f"[Memory] 💾 Saved: {list(memory_update.keys())}")
-        return memory
+        from memory import db
+        # Upsert only changed facts; never replace unrelated facts or sessions.
+        updates = {}
+        _recursive_update(updates, memory_update)
+        for category, key, entry in _all_entries(updates):
+            db.upsert_fact(category, key, entry["value"])
+        return load_memory()
 
 def format_memory_for_prompt(memory: dict | None) -> str:
     if not memory:
@@ -198,13 +200,10 @@ def remember(key: str, value: str, category: str = "notes") -> str:
 
 
 def forget(key: str, category: str = "notes") -> str:
-    memory = load_memory()
-    cat    = memory.get(category, {})
-    if key in cat:
-        del cat[key]
-        memory[category] = cat
-        save_memory(memory)
-        return f"Forgotten: {category}/{key}"
+    from memory import db
+    with _lock:
+        if db.delete_fact(category, key):
+            return f"Forgotten: {category}/{key}"
     return f"Not found: {category}/{key}"
 
 

@@ -44,6 +44,9 @@ class MasterOrchestrator:
             return "[FAILED] Empty request."
         if cancelled and cancelled():
             return "RESULT: CANCELLED"
+        from memory.learning import learn_explicit_preference
+        if learn_explicit_preference(text):
+            return "[DONE] Preference saved locally."
         recalled = recall_local(text, conversation_id=conversation_id)
         if recalled is not None:
             return recalled

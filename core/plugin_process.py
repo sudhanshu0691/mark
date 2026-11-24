@@ -5,6 +5,7 @@ sandbox. Plugins still execute as the current user. No UI/tool bridge is passed.
 """
 from __future__ import annotations
 import contextlib
+import signal
 import importlib.util
 import inspect
 import json
@@ -15,7 +16,25 @@ import sys
 import tempfile
 import time
 
+def _terminate(process):
+    # Kill the process group on POSIX; Windows taskkill includes descendants.
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=3, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    else:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+    if process.poll() is None:
+        process.kill()
+    process.wait(timeout=3)
+
 def run_isolated(path, name, args, timeout, cancelled):
+    if cancelled.is_set():
+        return "[CANCELLED] Plugin execution cancelled before launch."
     root = Path(__file__).resolve().parent.parent
     # Preserve only runtime/OS necessities, not application API credentials.
     allowed = {"SYSTEMROOT", "WINDIR", "PATH", "PATHEXT", "TEMP", "TMP", "TMPDIR",
@@ -30,13 +49,13 @@ def run_isolated(path, name, args, timeout, cancelled):
         process = subprocess.Popen(
             [sys.executable, "-m", "core.plugin_process", str(request), str(response)],
             cwd=root, env=env, stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=(os.name != "nt"))
         deadline = time.monotonic() + timeout
         try:
             while process.poll() is None:
                 if cancelled.is_set() or time.monotonic() >= deadline:
-                    process.kill()
-                    process.wait(timeout=2)
+                    _terminate(process)
                     return "[UNVERIFIED] Plugin worker terminated; inspect any completed side effects before retrying."
                 cancelled.wait(0.025)
             if process.returncode != 0 or not response.is_file():
@@ -46,8 +65,7 @@ def run_isolated(path, name, args, timeout, cancelled):
             return str(json.loads(response.read_text(encoding="utf-8"))["result"])
         finally:
             if process.poll() is None:
-                process.kill()
-                process.wait(timeout=2)
+                _terminate(process)
 
 def _worker(request, response):
     from core.plugins import PluginContext

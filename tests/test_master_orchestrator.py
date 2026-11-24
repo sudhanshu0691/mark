@@ -39,3 +39,17 @@ def test_specialist_validates_arguments_before_dispatch():
     assert agent.execute("excel", {"action": "read"}) == "[DONE]"
     assert len(calls) == 1
     assert "Excel Specialist" in agent.guidance()
+
+
+def test_specialist_handoff_tracks_failure_without_retry():
+    from core.agents.specialist import SpecialistExecutor
+    logs = []
+    def dispatch(name, args):
+        if name == "web_search":
+            raise RuntimeError("internal details")
+        return "[DONE]"
+    agent = SpecialistExecutor([{"name":"excel"},{"name":"web_search"}], dispatch, log=logs.append)
+    assert agent.execute("excel", {}) == "[DONE]"
+    assert agent.execute("web_search", {}).startswith("[FAILED]")
+    assert any("handoff" in msg for msg in logs)
+    assert "web_search: [FAILED]" in agent.guidance()
