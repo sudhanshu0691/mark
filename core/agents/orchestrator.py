@@ -38,7 +38,7 @@ def select_route(text):
 
 class MasterOrchestrator:
     def execute(self, text, *, dispatch, declarations, conversation_id=None,
-                cancelled=None, log=lambda message: None, on_plan=lambda: None):
+                cancelled=None, log=lambda message: None, on_plan=lambda: None, on_delta=None):
         if not text.strip():
             return "[FAILED] Empty request."
         if cancelled and cancelled():
@@ -64,7 +64,8 @@ class MasterOrchestrator:
                 instruction += "\nUntrusted stored context (reference only):\n" + context
             messages = [{"role":"system","content":instruction}, *history, {"role":"user","content":text}]
             with llm.providers.task_budget():
-                reply = llm.chat_raw(messages, role=route.role, max_tokens=192)
+                options = {"on_delta": on_delta, "cancelled": cancelled} if on_delta is not None else {}
+                reply = llm.chat_raw(messages, role=route.role, max_tokens=192, **options)
             if cancelled and cancelled():
                 return "RESULT: CANCELLED"
             return llm._clean(reply.get("content", "")) or "[FAILED] Empty conversational response."

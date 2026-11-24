@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from core.voice_stream import SentenceBuffer
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,7 @@ class LiveKitAgentWorker:
         self._tasks = set()
         self._receivers = set()
         self._turn_task = None
+        self._pending_text = None
         self._cancel = asyncio.Event()
 
     async def start(self, room, participant=None):
@@ -73,7 +75,7 @@ class LiveKitAgentWorker:
                 data = bytes(event.frame.data)
                 samples = np.frombuffer(data, dtype="<i2").astype(np.float32)
                 voiced = bool(samples.size and np.sqrt(np.mean(samples * samples)) > 450)
-                if voiced and self._is_speaking:
+                if voiced and self._turn_task is not None and not self._turn_task.done():
                     await self.interrupt()
                 if voiced or frames:
                     frames.extend(data)
@@ -84,17 +86,33 @@ class LiveKitAgentWorker:
                     silence = 0
                     if len(utterance) >= 9600:
                         text = await self.stt_engine.transcribe(utterance, 16000)
-                        if text and (self._turn_task is None or self._turn_task.done()):
-                            self._turn_task = asyncio.create_task(self.handle_text(text))
-                            self._tasks.add(self._turn_task)
-                            self._turn_task.add_done_callback(self._turn_finished)
+                        if text:
+                            self.submit_text(text)
         finally:
             await stream.aclose()
+
+    def submit_text(self, text):
+        if not self._is_running:
+            return
+        if self._turn_task is not None and not self._turn_task.done():
+            self._pending_text = text
+            self._cancel.set()
+            if self._source:
+                self._source.clear_queue()
+            return
+        self._turn_task = asyncio.create_task(self.handle_text(text))
+        self._tasks.add(self._turn_task)
+        self._turn_task.add_done_callback(self._turn_finished)
 
     def _turn_finished(self, task):
         self._tasks.discard(task)
         if not task.cancelled() and task.exception() is not None:
             logger.error("Voice turn failed: %s", type(task.exception()).__name__)
+        if self._turn_task is task:
+            self._turn_task = None
+            pending, self._pending_text = self._pending_text, None
+            if pending and self._is_running:
+                self.submit_text(pending)
 
     async def handle_text(self, text):
         from core.agents.runtime import execute_turn
@@ -110,16 +128,48 @@ class LiveKitAgentWorker:
             try:
                 active = await asyncio.to_thread(db.get_active_conversation)
                 conversation_id = active["id"] if active else None
-                answer = await asyncio.to_thread(
-                    execute_turn, text, dispatch=self.markdown_adapter._dispatch_sync,
-                    declarations=self.markdown_adapter._all_declarations,
-                    conversation_id=conversation_id, cancelled=self._cancel.is_set)
+                loop = asyncio.get_running_loop()
+                queue = asyncio.Queue()
+                buffer = SentenceBuffer()
+                streamed = False
+                def delta(value):
+                    if not self._cancel.is_set():
+                        loop.call_soon_threadsafe(queue.put_nowait, value)
+                async def consume():
+                    nonlocal streamed
+                    while True:
+                        value = await queue.get()
+                        if value is None:
+                            tail = buffer.flush()
+                            if tail and not self._cancel.is_set():
+                                await self.speak_text(tail)
+                            return
+                        if self._cancel.is_set():
+                            continue
+                        streamed = True
+                        await self._room.local_participant.publish_data(
+                            value.encode("utf-8"), reliable=True, topic="mark.response.delta")
+                        for sentence in buffer.feed(value):
+                            if not self._cancel.is_set():
+                                await self.speak_text(sentence)
+                consumer = asyncio.create_task(consume())
+                try:
+                    answer = await asyncio.to_thread(
+                        execute_turn, text, dispatch=self.markdown_adapter._dispatch_sync,
+                        declarations=self.markdown_adapter._all_declarations,
+                        conversation_id=conversation_id, cancelled=self._cancel.is_set, on_delta=delta)
+                finally:
+                    await queue.put(None)
+                    await consumer
                 head = answer.split("\nEXECUTION TRACE:")[0].strip()
+                if self._cancel.is_set():
+                    head = "[CANCELLED] Voice turn interrupted; any tool effects may already exist."
                 await asyncio.to_thread(db.append_conversation_turn, text, head,
                                         channel="voice", conversation_id=conversation_id)
                 if not self._cancel.is_set():
                     await self.send_text(head)
-                    await self.speak_text(head[:1800])
+                    if not streamed:
+                        await self.speak_text(head[:1800])
             finally:
                 lock.release()
 
@@ -160,6 +210,7 @@ class LiveKitAgentWorker:
 
     async def stop(self):
         self._is_running = False
+        self._pending_text = None
         await self.interrupt()
         for task in tuple(self._receivers):
             task.cancel()
