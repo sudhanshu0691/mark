@@ -55,7 +55,10 @@ class MasterOrchestrator:
             try:
                 if workflow_resume:
                     specialist = SpecialistExecutor(list(declarations()), dispatch, cancelled, log)
-                    return Workflow(specialist, cancelled, log, journal).execute({}, resume=workflow_resume[1].lower())
+                    with llm.providers.task_budget(max_requests=12):
+                        return Workflow(specialist, cancelled, log, journal).execute(
+                            {}, resume=workflow_resume[1].lower(),
+                        )
                 recovered = journal.recoverable()
                 return "Recovered workflows: " + ", ".join(recovered) if recovered else "No recovered workflows."
             except (OSError, RuntimeError, ValueError) as exc:

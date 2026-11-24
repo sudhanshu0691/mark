@@ -483,3 +483,38 @@ def test_recovered_workflow_keeps_completed_actions_and_blocks_uncertain_writes(
     assert "A dependency did not complete" in result
     assert calls == []
     assert identifier not in WorkflowJournal(path).recoverable()
+
+
+def test_workflow_lease_recovers_after_worker_process_exits(tmp_path):
+    import subprocess
+    import sys
+
+    from core.agents.recovery import WorkflowJournal
+
+    path = tmp_path / "workflow.db"
+    child = """
+from core.agents.recovery import WorkflowJournal
+import os
+import sys
+
+journal = WorkflowJournal(sys.argv[1])
+identifier = journal.create({'tasks': []})
+journal.write(running='last_action')
+print(identifier, flush=True)
+os._exit(17)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", child, str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=15,
+    )
+    assert result.returncode == 17, result.stderr
+    identifier = result.stdout.strip()
+    recovery = WorkflowJournal(path)
+    assert recovery.recoverable() == [identifier]
+    assert recovery.claim(identifier)["running"] == "last_action"
+    assert recovery.recoverable() == []
+    with pytest.raises(ValueError, match="already running"):
+        WorkflowJournal(path).claim(identifier)

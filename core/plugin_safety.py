@@ -50,6 +50,8 @@ def verify_result(name: str, args: dict, result: str) -> str:
         if path.suffix.lower() != ".pptx":
             path = path.with_suffix(".pptx")
     elif name == "excel" and action not in {"inspect", "profile"} and args.get("path"):
+        if args.get("open_workbook") is True:
+            return result  # The live edit was verified through COM and remains unsaved.
         path = Path(str(args["path"]))
     if path is not None:
         try:
