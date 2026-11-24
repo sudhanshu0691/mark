@@ -6,7 +6,7 @@ independent check afterwards, cheapest first:
 
     1. direct   file exists / window is open (no AI, no screenshot)
     2. screen   expected text or window is really on screen (UI Automation / OCR via screen_read)
-    3. vision   a local vision model looks at a screenshot and answers YES / NO / UNSURE
+    3. vision   an explicitly supplied verifier looks at a screenshot and answers YES / NO / UNSURE
 
 verify_step() returns a Verdict. The brain turns a failed verdict into [FAILED] and an
 inconclusive one into [UNVERIFIED], so "done" is only said when something independent agrees.
@@ -71,25 +71,6 @@ def default_deps(dispatch: Callable[[str, dict], str] | None = None) -> Deps:
     except Exception:
         pass
 
-    def shot() -> bytes:
-        import io
-        from actions.screen_read import grab_full
-        buf = io.BytesIO()
-        grab_full().save(buf, format="PNG")
-        return buf.getvalue()
-
-    def vis(img: bytes, q: str) -> str:
-        from core import llm
-        return llm.vision(img, q, system=_VISION_SYSTEM)
-
-    def proof(img: bytes, tag: str) -> str:
-        from core.paths import PROOF_DIR, ensure
-        ensure(PROOF_DIR)
-        p = PROOF_DIR / f"{time.strftime('%Y%m%d_%H%M%S')}_{re.sub(r'[^a-z0-9]+', '_', tag.lower())[:30]}.png"
-        p.write_bytes(img)
-        return str(p)
-
-    d.screenshot, d.vision, d.save_proof = shot, vis, proof
     return d
 
 

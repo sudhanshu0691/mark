@@ -62,7 +62,25 @@ def check(path: str | Path, write: bool = False) -> tuple[bool, str]:
     cfg = load()
     if cfg.get("invalid_policy"):
         return False, "File access policy is unreadable. Repair config/permissions.json."
-    target = _norm(path)
+    try:
+        target = _norm(path)
+    except (OSError, RuntimeError, ValueError):
+        return False, "Path could not be resolved safely."
+    protected_files = {
+        _norm(BASE_DIR / part) for part in (
+            "config/api_keys.json", "config/runtime.env", "config/.env", "config/livekit.ini",
+            "config/contacts.json", "config/phone.json", "memory/user_memory.json",
+            "memory/long_term.json", "memory/conversation_history.json",
+        )
+    }
+    if (
+        target in protected_files
+        or any(_inside(target, _norm(BASE_DIR / part)) for part in ("memory/identity", "data/calls"))
+        or (_inside(target, _norm(BASE_DIR / "data"))
+            and Path(target).name.startswith(("mark.db", "tasks.db", "cloud_usage.db")))
+        or (_inside(target, _norm(BASE_DIR)) and Path(target).name in {".env", "runtime.env"})
+    ):
+        return False, "Access to MARK credentials and private runtime data is restricted."
     # The user's C: exception applies to reads as well as writes.
     if platform.system() == "Windows" and Path(target).drive.lower() == "c:":
         home = Path.home()

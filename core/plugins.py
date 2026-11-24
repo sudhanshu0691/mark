@@ -1,9 +1,8 @@
 """
 Plugin system.
 
-Drop a .py file into the  plugins/  folder and Mark picks it up automatically
-(no code changes anywhere else).  The folder is watched: add, edit or delete a
-plugin and Mark reloads it within ~2 seconds.
+Bundled or explicitly trusted Python plugins load from the plugins directory.
+Discovery checks the source fingerprint before importing a plugin.
 
 A plugin file looks like this (see plugins/_template.py):
 
@@ -25,6 +24,7 @@ Files or folders starting with "_" are ignored.  A folder plugin uses plugins/<n
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import inspect
 import json
@@ -40,6 +40,42 @@ from typing import Any, Callable
 from core.result import ActionResult
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent / "plugins"
+_TRUST_DIR = PLUGIN_DIR.parent / "config"
+_MAX_SOURCE_BYTES = 2 * 1024 * 1024
+
+
+def _trusted_plugins():
+    fingerprints = {}
+    for filename in ("bundled_plugins.json", "trusted_plugins.json"):
+        try:
+            manifest = json.loads((_TRUST_DIR / filename).read_text(encoding="utf-8"))
+            if not isinstance(manifest, dict):
+                raise ValueError("Expected a path-to-SHA256 mapping")
+            fingerprints.update({
+                name: digest for name, digest in manifest.items()
+                if isinstance(digest, str) and re.fullmatch(r"[a-f0-9]{64}", digest)
+            })
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as exc:
+            print(f"[plugin] Cannot read {filename}: {type(exc).__name__}")
+    return fingerprints
+
+
+def _verified_source(path, fingerprints):
+    relative = path.relative_to(PLUGIN_DIR).as_posix()
+    if path.resolve() != PLUGIN_DIR.resolve() / relative:
+        raise ValueError("Plugin paths must resolve to their declared location.")
+    expected = fingerprints.get(relative)
+    if not expected:
+        raise ValueError("Plugin is untrusted. OS sandbox execution is unavailable.")
+    with path.open("rb") as source_file:
+        source = source_file.read(_MAX_SOURCE_BYTES + 1)
+    if len(source) > _MAX_SOURCE_BYTES:
+        raise ValueError("Plugin source exceeds the size limit.")
+    if hashlib.sha256(source.replace(b"\r\n", b"\n")).hexdigest() != expected:
+        raise ValueError("Plugin source changed since approval.")
+    return source
 
 
 class PluginContext:
@@ -95,7 +131,8 @@ class PluginManager:
         self.ctx = ctx
         self.loaded: dict[str, _Loaded] = {}     # plugin name -> loaded
         self.errors: dict[str, str] = {}         # file -> error text
-        self._mtimes: dict[str, float] = {}
+        self._mtimes: dict[str, int] = {}
+        self._trust = {}
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._inflight: dict[str, tuple[Future, PluginContext]] = {}
@@ -123,11 +160,11 @@ class PluginManager:
         return out
 
     @staticmethod
-    def _stamp(p: Path) -> float:
+    def _stamp(p: Path) -> int:
         try:
-            return max(f.stat().st_mtime for f in ([p] + list(p.parent.glob("*.py"))))
+            return p.stat().st_mtime_ns
         except OSError:
-            return 0.0
+            return 0
 
     # ── loading ──────────────────────────────────────────────────────────────
     @staticmethod
@@ -147,7 +184,7 @@ class PluginManager:
                     f"{path.name}: declaration '{decl.get('name')}' properties must be an object"
                 )
 
-    def _load_file(self, path: Path) -> None:
+    def _load_file(self, path: Path, *, source: bytes | None = None) -> None:
         key = str(path)
         pname = path.parent.name if path.name == "plugin.py" else path.stem
         try:
@@ -155,7 +192,7 @@ class PluginManager:
             if spec is None or spec.loader is None:
                 raise ImportError("cannot create import spec")
             mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
+            exec(compile(source if source is not None else path.read_bytes(), str(path), "exec"), mod.__dict__)
             if getattr(mod, "ENABLED", True) is False:
                 self.errors.pop(key, None)
                 return
@@ -177,6 +214,7 @@ class PluginManager:
             if name in self.loaded:
                 raise ValueError(f"duplicate plugin name '{name}'")
             loaded = _Loaded(name, path, mod, tools)
+            loaded.source_digest = hashlib.sha256(source).digest() if source is not None else None
             if hasattr(mod, "health_check"):
                 health = mod.health_check(self._context_for(loaded))
                 loaded.health = "healthy" if health is not False else "unhealthy"
@@ -201,9 +239,15 @@ class PluginManager:
             self.loaded.clear()
             self.errors.clear()
             self._mtimes.clear()
+            self._trust = _trusted_plugins()
             for f in self._files():
                 self._mtimes[str(f)] = self._stamp(f)
-                self._load_file(f)
+                try:
+                    source = _verified_source(f, self._trust)
+                except (OSError, ValueError) as exc:
+                    self.errors[str(f)] = str(exc)
+                    continue
+                self._load_file(f, source=source)
             self._drop_conflicts()
             names = ", ".join(self.loaded) or "none"
             print(f"[plugin] loaded: {names}")
@@ -281,11 +325,19 @@ class PluginManager:
                 return "[UNVERIFIED] Previous invocation of this plugin is still running. Do not retry."
             if len(self._inflight) >= 4:
                 return "[FAILED] Plugin workers are busy"
+            source = None
+            if str(owner.path) in self._mtimes:
+                try:
+                    source = _verified_source(owner.path, _trusted_plugins())
+                    if hashlib.sha256(source).digest() != owner.source_digest:
+                        return "[FAILED] Plugin changed; reload before running it."
+                except (OSError, ValueError):
+                    return "[FAILED] Plugin approval is missing or its source changed."
             context = self._context_for(owner)
             def invoke():
                 if owner.isolated:
                     from core.plugin_process import run_isolated
-                    return run_isolated(owner.path, name, args, owner.timeout, context.cancelled)
+                    return run_isolated(owner.path, name, args, owner.timeout, context.cancelled, source=source)
                 nparams = len(inspect.signature(fn).parameters)
                 return fn(args, context) if nparams >= 2 else fn(args)
             future = self._pool.submit(invoke)
@@ -328,6 +380,7 @@ class PluginManager:
                     "plugin": loaded.name,
                     "version": loaded.version,
                     "health": loaded.health,
+                    "trust": "trusted_native",
                     "tools": sorted(loaded.tools),
                     "capabilities": loaded.capabilities,
                     "timeout": loaded.timeout,
@@ -366,7 +419,7 @@ class PluginManager:
     def poll(self) -> bool:
         """Reload if the folder changed. Returns True if the tool list changed."""
         current = {str(f): self._stamp(f) for f in self._files()}
-        if current == self._mtimes:
+        if current == self._mtimes and _trusted_plugins() == self._trust:
             return False
         before = json.dumps(self.declarations(), sort_keys=True, default=str)
         self.load_all()

@@ -7,6 +7,7 @@ from time import monotonic
 _lock = RLock()
 _clients = {}
 _stats = {}
+_circuits = {}
 
 
 from contextlib import contextmanager
@@ -43,8 +44,11 @@ def reserve(name, cfg):
     per_task = int(limits.get("requests_per_task", 0))
     daily = int(limits.get("requests_per_day", 0))
     usage = _task_usage.get()
-    if per_task > 0 and usage is not None and sum(usage.values()) >= per_task:
-        raise BudgetExceeded(f"{name} reached the shared per-task request budget.")
+    if usage is not None:
+        with _lock:
+            if per_task > 0 and sum(usage.values()) >= per_task:
+                raise BudgetExceeded(f"{name} reached the shared per-task request budget.")
+            usage[name] = usage.get(name, 0) + 1
     if daily > 0:
         day = date.today().isoformat()
         USAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -60,12 +64,15 @@ def reserve(name, cfg):
                 conn.execute("DELETE FROM usage WHERE day < date('now', '-31 day')")
         finally:
             conn.close()
-    if usage is not None:
-        usage[name] = usage.get(name, 0) + 1
 
 
 @contextmanager
 def cloud_request(name, cfg):
+    if cfg.get("provider_circuit_breaker", False):
+        with _lock:
+            remaining = _circuits.get(name, (0, 0))[1] - monotonic()
+            if remaining > 0:
+                raise BudgetExceeded(f"{name} is cooling down for {remaining:.0f}s.")
     if not _slots.acquire(timeout=5):
         raise BudgetExceeded("Cloud workers are busy.")
     try:
@@ -113,8 +120,19 @@ def client_for(name, key):
         return entry[1] if entry and entry[0] == key else None
 
 
-def record(name, model, start, *, status=200, tokens=0, first_ms=None):
+def record(name, model, start, *, status=200, tokens=0, first_ms=None, retry_after=None):
     with _lock:
+        failures, _ = _circuits.get(name, (0, 0))
+        if status == 200:
+            _circuits.pop(name, None)
+        elif isinstance(status, int) and (status == 0 or status == 429 or 500 <= status < 600):
+            failures += 1
+            if failures >= 3 or (status == 429 and retry_after is not None):
+                cooldown = max(15, min(120, retry_after or 15))
+                _circuits[name] = (0, monotonic() + cooldown)
+            else:
+                _circuits[name] = (failures, 0)
+
         item = _stats.setdefault(name, {"requests": 0, "tokens": 0})
         item["requests"] += 1
         item["tokens"] += tokens or 0
@@ -135,6 +153,7 @@ def close():
     with _lock:
         clients = list(_clients.values())
         _clients.clear()
+        _circuits.clear()
         for item in _stats.values():
             item["state"] = "STOPPED"
     for _, client in clients:
