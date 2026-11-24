@@ -8,7 +8,7 @@ if not exist ".venv\Scripts\python.exe" (
 )
 if not exist "data" mkdir "data"
 if /i "%~1"=="--check" (
-    ".venv\Scripts\python.exe" check_env.py
+    ".venv\Scripts\python.exe" -m tooling.check_env
     exit /b
 )
 if /i "%~1"=="--console" (

@@ -9,13 +9,14 @@ if errorlevel 1 (
     if /i not "%~1"=="--non-interactive" pause
     exit /b 1
 )
-uv sync --locked --python 3.11 --extra livekit --extra vision --no-dev
+set "UV_PROJECT_ENVIRONMENT=%CD%\.venv"
+uv sync --project tooling --locked --python 3.11 --extra livekit --extra vision --no-dev
 if errorlevel 1 (
     echo Dependency setup failed. See the uv error above.
     if /i not "%~1"=="--non-interactive" pause
     exit /b 1
 )
-uv run --no-sync python setup.py --dependencies-ready
+".venv\Scripts\python.exe" -m tooling.setup --dependencies-ready
 if errorlevel 1 (
     echo MARK preflight failed.
     if /i not "%~1"=="--non-interactive" pause

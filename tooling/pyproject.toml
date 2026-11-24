@@ -2,7 +2,7 @@
 name = "mark"
 version = "1.0.0"
 description = "MARK - Adaptive cloud-assisted desktop automation with persistent memory"
-readme = "README.md"
+readme = "../docs/README.md"
 requires-python = ">=3.11,<3.13"
 license = {text = "MIT"}
 authors = [{name = "MARK Project"}]
@@ -73,7 +73,7 @@ dev = ["pytest>=8", "pytest-asyncio", "pytest-qt", "pytest-cov", "ruff"]
 package = false
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["../tests"]
 asyncio_default_fixture_loop_scope = "function"
 markers = [
     "unit: unit tests",

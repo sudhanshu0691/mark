@@ -1,7 +1,7 @@
 model:
   name: custom_yolov8_human_detection
   # This is the supplied, validated model. Do not rename, replace, or retrain it.
-  path: human.pt
+  path: assets/models/human.pt
   framework: ultralytics
   confidence: 0.45
   device: auto

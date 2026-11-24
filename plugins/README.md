@@ -1,6 +1,6 @@
 # Plugins
 
-MARK hot-loads reviewed plugins whose source fingerprints match the bundled manifest or local trust configuration. See [Trusted plugins](../README.md#trusted-plugins) for approval and revocation. Copy `_template.py`, rename it without a leading underscore, and implement its tool declaration and `run(args, ctx)` function. Files and folders starting with `_` are ignored. Folder plugins use `plugins/<name>/plugin.py`.
+MARK hot-loads reviewed plugins whose source fingerprints match the bundled manifest or local trust configuration. See [Trusted plugins](../docs/README.md#trusted-plugins) for approval and revocation. Copy `_template.py`, rename it without a leading underscore, and implement its tool declaration and `run(args, ctx)` function. Files and folders starting with `_` are ignored. Folder plugins use `plugins/<name>/plugin.py`.
 
 `visualization.py` creates data charts and timelines. Project structure, UML/C4/ERD, flowcharts, sequences, and engineering drawings use the built-in `visualize` action. Generated charts and diagrams are saved under `data/visualisations/`.
 

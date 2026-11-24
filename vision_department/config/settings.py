@@ -7,11 +7,12 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = Path(__file__).with_name("model_config.yaml")
+DEFAULT_MODEL_PATH = ROOT / "assets" / "models" / "human.pt"
 
 
 @dataclass(frozen=True)
 class VisionSettings:
-    model_path: Path = ROOT / "human.pt"
+    model_path: Path = DEFAULT_MODEL_PATH
     confidence: float = 0.45
     device: str = "auto"
     interval_seconds: float = 1.0
@@ -46,9 +47,11 @@ class VisionSettings:
         recording = values.get("recording", {})
         events = values.get("events", {})
         motion = values.get("motion", {})
-        path_value = Path(str(model.get("path", "human.pt")))
+        path_value = Path(str(model.get("path", DEFAULT_MODEL_PATH)))
         if not path_value.is_absolute():
             path_value = ROOT / path_value
+        if path_value == ROOT / "human.pt" and not path_value.exists():
+            path_value = DEFAULT_MODEL_PATH
         settings = cls(
             model_path=path_value.resolve(),
             confidence=float(model.get("confidence", 0.45)),

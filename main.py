@@ -60,14 +60,14 @@ except ImportError:
 
 
 def _install_first_run_requirements() -> None:
-    """Dependencies must be installed explicitly via setup.py/setup_windows.bat.
+    """Dependencies must be installed explicitly via tooling.setup/setup_windows.bat.
 
     Automatic pip installs during normal startup are disabled for stability and
     supply-chain safety. If config is missing, just inform the user.
     """
     if not (_platform.system() == "Windows" and not (Path(__file__).resolve().parent / "config" / "api_keys.json").exists()):
         return
-    print("[MARK] First run detected. Please run setup_windows.bat (or `python setup.py`) to install dependencies.")
+    print("[MARK] First run detected. Please run setup_windows.bat (or `python -m tooling.setup`) to install dependencies.")
 
 
 _install_first_run_requirements()
@@ -91,7 +91,7 @@ import numpy as np
 import sounddevice as sd
 import google.genai as genai
 from google.genai import types as gtypes
-from ui import MarkUI
+from desktop.ui import MarkUI
 from memory.memory_manager import (
     load_memory, format_memory_for_prompt,
     save_session_summary, pop_last_session,
@@ -2378,8 +2378,8 @@ class MarkLive:
             await asyncio.sleep(delay)
 
 def main():
-    ui = MarkUI("assets/face.png")
-    from mark_orb import start_orb
+    ui = MarkUI(str(BASE_DIR / "assets" / "face.png"))
+    from desktop.mark_orb import start_orb
     ui.orb = start_orb(on_restore=ui.restore_from_orb, visible=False)
     from core import llm as _llm_boot
     _llm_boot.set_provider_listener(ui.set_llm_provider)
@@ -2410,7 +2410,7 @@ def check_startup():
     from PySide6.QtCore import QTimer
 
     started = time.perf_counter()
-    ui = MarkUI("assets/face.png")
+    ui = MarkUI(str(BASE_DIR / "assets" / "face.png"))
     runtime = MarkLive(ui)
     try:
         runtime.plugins.load_all(BUILTIN_NAMES)

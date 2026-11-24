@@ -7,6 +7,8 @@ from pathlib import Path
 def main():
     if getattr(sys, "frozen", False):
         root = Path(sys.executable).resolve().parent
+        if root.name.casefold() == "packaging" and not (root / "main.py").is_file():
+            root = root.parent
     else:
         root = Path(__file__).resolve().parent.parent
     scripts = root / ".venv" / "Scripts"

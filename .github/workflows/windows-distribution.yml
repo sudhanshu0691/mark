@@ -7,15 +7,16 @@ on:
     paths:
       - 'packaging/**'
       - 'main.py'
-      - 'ui.py'
+      - 'desktop/**'
       - 'core/**'
       - 'actions/**'
       - 'plugins/**'
       - 'memory/**'
       - 'setup_windows.bat'
       - 'run_mark.bat'
-      - 'pyproject.toml'
-      - 'uv.lock'
+      - 'tooling/**'
+      - 'assets/**'
+      - 'requirements.txt'
       - '.github/workflows/windows-distribution.yml'
 permissions:
   contents: read
@@ -40,10 +41,15 @@ jobs:
         run: |
           git archive --format=zip --output=source.zip HEAD
           Expand-Archive source.zip -DestinationPath release/MARK
-          Copy-Item dist/MARK.exe release/MARK/MARK.exe
-          foreach ($file in @("uv.lock", "main.py", "run_mark.bat", "setup_windows.bat", "config/bundled_plugins.json")) {
+          Copy-Item dist/MARK.exe release/MARK/packaging/MARK.exe
+          foreach ($file in @("tooling/uv.lock", "tooling/pyproject.toml", "desktop/ui.py", "assets/models/human.pt", "main.py", "run_mark.bat", "setup_windows.bat", "config/bundled_plugins.json")) {
             if (!(Test-Path "release/MARK/$file")) { throw "Missing archived file $file" }
           }
+          $allowed = @("main.py", "requirements.txt", "autostart_on_login.bat", "run_as_admin.bat", "run_mark.bat", "setup_windows.bat")
+          $unexpected = Get-ChildItem release/MARK -File | Where-Object {
+            !$_.Name.StartsWith(".") -and $_.Name -notin $allowed
+          }
+          if ($unexpected) { throw "Unexpected root files: $($unexpected.Name -join ', ')" }
           Compress-Archive -Path release/MARK -DestinationPath MARK-windows.zip
           Get-FileHash MARK-windows.zip -Algorithm SHA256 | Format-List | Out-File MARK-windows.sha256.txt
       - name: Install and check the packaged runtime
@@ -55,7 +61,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Packaged setup failed" }
           cmd.exe /d /c run_mark.bat --check
           if ($LASTEXITCODE -ne 0) { throw "Runtime diagnostic failed" }
-          $launcher = Start-Process .\MARK.exe -ArgumentList '--check' -Wait -PassThru
+          $launcher = Start-Process .\packaging\MARK.exe -ArgumentList '--check' -Wait -PassThru
           if ($launcher.ExitCode -ne 0) { throw "Launcher check failed with $($launcher.ExitCode)" }
           Pop-Location
       - uses: actions/upload-artifact@v4

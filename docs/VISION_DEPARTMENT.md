@@ -4,7 +4,7 @@ MARK's Vision Department is embedded in the existing PySide6 desktop application
 
 ## Model validation
 
-- Configured checkpoint: `human.pt` at the project root (the supplied file; left in place).
+- Configured checkpoint: `assets/models/human.pt`.
 - File size: 6,259,289 bytes.
 - SHA-256: `A6AEAD7BF0ECCB35BD56731BFAA6EA19A4645A66150D2D0B19DD3FB1B116EF43`.
 - Loaded with Ultralytics 8.4.212 and CPU PyTorch 2.15.0 under Python 3.11.
@@ -29,7 +29,7 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
-python -m pip install -r requirements-vision.txt
+python -m pip install -r tooling/requirements-vision.txt
 ```
 
 If `.venv` already exists, activate it rather than replacing it. Install FFmpeg and ensure it is available on `PATH` if OpenCV's bundled FFmpeg cannot open the RTSPS stream. The app will display a generic error type/message and never print stream URLs or tokens.
@@ -38,7 +38,7 @@ If `.venv` already exists, activate it rather than replacing it. Install FFmpeg 
 
 1. If you accept the third-party integration, run `python -m vision_department.camera.authentication` from the project environment. It asks for the phone and OTP with hidden console input and uses the Qubo client’s HTTPS authentication; it stores a session in your Windows profile, outside this repository. The documented phone login session lasts about one hour. Do not put OTPs in a script or pass them on a command line.
 2. Run `python -m qubopy devices` and copy the Qubo camera's device UUID into `camera.device_id` in `vision_department/config/model_config.yaml`. This project does not store your Qubo account password or OTP.
-3. Confirm `model.path: human.pt` points to the supplied checkpoint. Change confidence, interval, cooldown, target class, or retention days in the YAML as needed.
+3. Confirm `model.path: assets/models/human.pt` points to the supplied checkpoint. Change confidence, interval, cooldown, target class, or retention days in the YAML as needed.
 4. `recording.enabled` must remain `false`; recording is not implemented. The department only processes in-memory frames and stores event metadata in `data/vision_events.db`.
 5. Start the existing desktop app, open **VISION**, and click **Start Monitoring**. The model is validated before a Qubo session or camera connection is attempted.
 
@@ -58,7 +58,7 @@ The optional API is not started by the desktop app. If needed, run `python -m uv
 
 ## Troubleshooting
 
-- **Model missing / invalid:** check the path and run `python -c "from ultralytics import YOLO; m=YOLO('human.pt'); print(m.names)"`. No weights are downloaded automatically.
+- **Model missing / invalid:** check the path and run `python -c "from ultralytics import YOLO; m=YOLO('assets/models/human.pt'); print(m.names)"`. No weights are downloaded automatically.
 - **No Qubo devices:** complete Qubo app setup and authentication, check the saved Qubo client session, then retry `python -m qubopy devices`.
 - **Device UUID not found:** use the UUID for this Qubo account and edit `camera.device_id`.
 - **Stream unavailable:** exact model/firmware support must be confirmed with Qubo; the official docs do not promise local RTSP/ONVIF. Check internet access and session expiry. This connector uses cloud RTSPS, not a guessed LAN URL.

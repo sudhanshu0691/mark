@@ -69,7 +69,7 @@ class GestureMouse:
                 hands = mp.solutions.hands.Hands(max_num_hands=1, min_detection_confidence=0.75,
                                                  min_tracking_confidence=0.7)
             except Exception as exc:
-                raise RuntimeError('Gesture tracking unavailable; install requirements-gesture.txt') from exc
+                raise RuntimeError('Gesture tracking unavailable; install tooling/requirements-gesture.txt') from exc
             self._hands = hands
             self._reset()
             self._generation += 1

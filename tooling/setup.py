@@ -1,9 +1,9 @@
 # MARK setup — installs declared dependencies and checks available features.
 #
 # Usage:
-#   python setup.py                 (inside a venv is best, plain python also works)
+#   python -m tooling.setup                 (inside a venv is best, plain python also works)
 #   setup_windows.bat               (one-click: creates venv + calls this file)
-#   python setup.py --doctor        (diagnose only: no installs, prints a health report)
+#   python -m tooling.setup --doctor        (diagnose only: no installs, prints a health report)
 import argparse
 import importlib
 import subprocess
@@ -12,7 +12,8 @@ import platform
 import json
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
+TOOLING_DIR = Path(__file__).resolve().parent
+ROOT = TOOLING_DIR.parent
 IS_WIN = platform.system() == "Windows"
 
 # module import name -> (friendly name, is_optional)
@@ -82,7 +83,7 @@ def pip_install(exe, reqs: Path) -> tuple[bool, str]:
     r = _run(exe, "-m", "pip", "install", "--upgrade", "pip")
     if r.returncode != 0:
         return False, f"pip upgrade failed (exit {r.returncode})"
-    constraints = ["-c", str(HERE / "constraints-windows-py311.txt")] if IS_WIN and sys.version_info[:2] == (3, 11) else []
+    constraints = ["-c", str(TOOLING_DIR / "constraints-windows-py311.txt")] if IS_WIN and sys.version_info[:2] == (3, 11) else []
     r = _run(exe, "-m", "pip", "install", *constraints, "-r", str(reqs))
     if r.returncode != 0:
         return False, (
@@ -166,9 +167,9 @@ def doctor() -> int:
         print("\nMissing OPTIONAL features (MARK will report these capabilities unavailable):")
         for m in opt:
             print(f"  ? {m}")
-    cfg = HERE / "config"
+    cfg = ROOT / "config"
     print(f"\nconfig/api_keys.json: {'legacy profile present' if (cfg / 'api_keys.json').exists() else 'optional; OS credential store is preferred'}")
-    print(f"plugins/: {len(list((HERE / 'plugins').glob('*.py')))} python files")
+    print(f"plugins/: {len(list((ROOT / 'plugins').glob('*.py')))} python files")
     report_capabilities()
     supported = (3, 11) <= sys.version_info[:2] < (3, 13) and sys.maxsize > 2**32
     if not supported:
@@ -241,7 +242,7 @@ def main() -> int:
 
     if not args.dependencies_ready:
         print("Installing requirements...")
-        ok, why = pip_install(sys.executable, HERE / "requirements.txt")
+        ok, why = pip_install(sys.executable, ROOT / "requirements.txt")
         if not ok:
             print(f"\nINSTALL FAILED:\n{why}")
             return 1
