@@ -4,6 +4,7 @@ Not a complete DLP or image-redaction system. Never mutates local history.
 """
 from __future__ import annotations
 import re
+import json
 
 _PATTERNS = (
     re.compile(r"(?i)(\b(?:password|passwd|api[_ -]?key|access[_ -]?token|secret)\b\s*[:=]\s*)([^\s,;]+)"),
@@ -16,6 +17,8 @@ def redact_text(text):
         text = pattern.sub(lambda m: (m.group(1) if m.lastindex else "") + "[REDACTED]", text)
     return text
 
+_SENSITIVE = re.compile(r"^(?:password|passwd|passphrase|api[_ -]?key|access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|secret|authorization|private[_ -]?key)$", re.I)
+
 def redact_messages(messages, cfg):
     if not cfg.get("privacy", {}).get("redact_sensitive_before_cloud", True):
         return messages
@@ -25,7 +28,26 @@ def redact_messages(messages, cfg):
         if isinstance(value, list):
             return [clean(item) for item in value]
         if isinstance(value, dict):
-            return {key: clean(item) for key, item in value.items()}
+            result = {}
+            for key, item in value.items():
+                if _SENSITIVE.fullmatch(str(key)):
+                    result[key] = "[REDACTED]"
+                elif key == "arguments" and isinstance(item, str):
+                    try:
+                        result[key] = json.dumps(clean(json.loads(item)), ensure_ascii=False)
+                    except (ValueError, TypeError):
+                        result[key] = redact_text(item)
+                else:
+                    result[key] = clean(item)
+            return result
         return value
-    return [{key: clean(value) if key == "content" else value
+    # Native Gemini content carries thought signatures. Copy its typed structure
+    # while redacting textual and function-call data, leaving binary metadata intact.
+    def native(value):
+        if not hasattr(value, "model_dump") or not hasattr(type(value), "model_validate"):
+            return value
+        data = value.model_dump(exclude_none=True)
+        return type(value).model_validate(clean(data))
+    return [{key: (native(value) if key == "_gemini_content" else clean(value))
+             if key in {"content", "tool_calls", "_gemini_content"} else value
              for key, value in message.items()} for message in messages]
