@@ -11,7 +11,7 @@ from threading import Lock
 
 import numpy as np
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = Path(__file__).resolve().parents[2]
 CONFIG = BASE_DIR / "config" / "phone.json"
 DEFAULTS = {
     "user_name": "", "assistant_name": "Mark", "language": "en", "whisper_model": "small", "cable_output": "CABLE Input",

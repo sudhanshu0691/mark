@@ -51,6 +51,7 @@ class LiveKitAgentWorker:
 
         # Session state
         self._session = None
+        self._restored_turns = []
         self._loop = None
         self._is_running = False
         self._is_speaking = False
@@ -170,9 +171,7 @@ class LiveKitAgentWorker:
             if active:
                 turns = db.load_conversation_turns(conversation_id=active["id"])
                 logger.info(f"Restored {len(turns)} conversation turns")
-                if self.markdown_adapter:
-                    for turn in turns:
-                        pass
+                self._restored_turns = turns
         except Exception as e:
             logger.error(f"Failed to restore context: {e}", exc_info=True)
 
@@ -198,14 +197,13 @@ class LiveKitAgentWorker:
 
         try:
             if self.tts_engine:
-                audio_chunk = await self.tts_engine.synthes(text)
+                audio_chunk = await self.tts_engine.synthesize(text)
                 if audio_chunk:
                     logger.debug(f"Generated TTS audio: {len(audio_chunk)} bytes")
                 else:
                     logger.warning("TTS returned no audio")
 
-            if not self._is_speaking:
-                self._is_speaking = False
+            self._is_speaking = False
 
         except Exception as e:
             logger.error(f"Error during TTS: {e}", exc_info=True)
@@ -240,37 +238,3 @@ class LiveKitAgentWorker:
             self._local_cancel_event.set()
         await self._cleanup()
 
-    async def speak_text(self, text: str) -> None:
-        """Generate and play text-to-speech.
-
-        Args:
-            text: Text to speak
-        """
-        if not self._is_running:
-            return
-
-        self._is_speaking = True
-
-        try:
-            if self.tts_engine:
-                audio_chunk = await self.tts_engine.synthes(text)
-                if audio_chunk:
-                    logger.debug(f"Generated TTS audio: {len(audio_chunk)} bytes")
-                else:
-                    logger.warning("TTS returned no audio")
-
-            if not self._is_speaking:
-                self._is_speaking = False
-
-        except Exception as e:
-            logger.error(f"Error during TTS: {e}", exc_info=True)
-            self._is_speaking = False
-
-    async def interrupt(self) -> None:
-        """Handle user interrupt - stop current speech and cancel response."""
-        logger.info("User interrupt detected")
-        self._interrupted = True
-        self._cancel_requested = True
-        self._is_speaking = False
-        if self._local_cancel_event:
-            self._local_cancel_event.set()
