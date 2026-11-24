@@ -147,7 +147,7 @@ def load_config(refresh: bool = False) -> dict[str, Any]:
         cfg["profile"] = os.getenv("MARK_PROFILE", cfg.get("profile", "balanced")).strip().lower()
         if cfg["profile"] == "offline":
             cfg["backend"] = "ollama"
-        if cfg.get("backend") not in {"ollama", "gemini"}:
+        if cfg.get("backend") not in {"ollama", "gemini", "multi_provider"}:
             raise LLMUnavailable("Unsupported LLM backend. Choose ollama or gemini.")
         _cfg_cache = cfg
         return cfg
@@ -520,12 +520,77 @@ def chat_raw(messages: list[dict], role: str = "text", tools: list[dict] | None 
     """Send one chat request to the configured provider."""
     cfg = load_config()
     local_messages = [{k: v for k, v in msg.items() if k != "_local_only"} for msg in messages]
+    if cfg.get("backend") == "multi_provider":
+        # Free-tier eligibility is account-specific; never assume that a model is free.
+        if cfg.get("free_tier_only", True) and not cfg.get("verified_free_models"):
+            if not cfg.get("automatic_fallback", True):
+                raise LLMUnavailable("Cloud model free-tier eligibility is not verified.")
+            return _run_provider("ollama", _ollama_chat, local_messages, role, tools, temperature, max_tokens, model, json_mode)
+        cloud_messages = [clean for clean, original in zip(local_messages, messages) if not original.get("_local_only")]
+        if not cfg.get("share_history_with_cloud", False):
+            last_user = next ( (i for i in range(len(cloud_messages)-1, -1, -1) if cloud_messages[i].get("role") == "user"), -1)
+            cloud_messages = [m for m in cloud_messages[:last_user] if m.get("role") == "system"] + cloud_messages[last_user:] if last_user >= 0 else []
+        try:
+            if role == "vision":
+                if not cfg.get("allow_cloud_vision", False):
+                    raise LLMUnavailable("Cloud vision is not authorized.")
+                vision_model = cfg.get("gemini", {}).get("vision_model")
+                if cfg.get("free_tier_only", True) and vision_model not in cfg.get("verified_free_models", []):
+                    raise LLMUnavailable("Gemini model free-tier eligibility is not verified.")
+                return _run_provider("gemini", _gemini_chat, cloud_messages, role, tools, temperature, max_tokens, json_mode)
+            return _run_provider("groq", _groq_chat, cloud_messages, role, tools, temperature, max_tokens, json_mode)
+        except (LLMUnavailable, providers.BudgetExceeded):
+            if not cfg.get("automatic_fallback", True):
+                raise
+            return _run_provider("ollama", _ollama_chat, local_messages, role, tools, temperature, max_tokens, model, json_mode)
     if cfg.get("backend") == "gemini":
         cloud_messages = [clean for clean, original in zip(local_messages, messages) if not original.get("_local_only")]
         return _run_provider("gemini", _gemini_chat, cloud_messages, role, tools, temperature, max_tokens, json_mode)
     if cfg.get("backend") == "ollama":
         return _run_provider("ollama", _ollama_chat, local_messages, role, tools, temperature, max_tokens, model, json_mode)
     raise LLMUnavailable("Unsupported LLM backend. Choose ollama or gemini.")
+
+
+def _groq_chat(messages, role, tools, temperature, max_tokens, json_mode):
+    from core.secrets import get_secret
+    cfg = load_config()
+    models = cfg.get("providers", {}).get("groq", {})
+    name = models.get(f"{role}_model", models.get("text_model", "qwen/qwen3.8-27b"))
+    if cfg.get("free_tier_only", True) and name not in cfg.get("verified_free_models", []):
+        raise LLMUnavailable("Groq model free-tier eligibility is not verified.")
+    key = get_secret("groq")
+    if not key:
+        raise LLMUnavailable("Groq API key is not configured.")
+    client = providers.client_for("groq", key)
+    if client is None:
+        if providers.initialize("groq", cfg) != "CONFIGURED":
+            raise LLMUnavailable("Groq client is unavailable.")
+        client = providers.client_for("groq", key)
+    payload = {"model": name, "messages": messages, "max_completion_tokens": max_tokens or 512}
+    if temperature is not None:
+        payload["temperature"] = temperature
+    if tools:
+        payload["tools"] = tools
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
+    if name == "qwen/qwen3.8-27b":
+        payload["reasoning_effort"] = "none"
+    start = time.monotonic()
+    try:
+        with providers.cloud_request("groq", cfg):
+            response = client.chat.completions.create(**payload)
+        message = response.choices[0].message
+        providers.record("groq", name, start, tokens=getattr(response.usage, "total_tokens", 0))
+        result = {"role": "assistant", "content": _clean(message.content or "")}
+        if message.tool_calls:
+            result["tool_calls"] = [call.model_dump(exclude_none=True) for call in message.tool_calls]
+        return result
+    except providers.BudgetExceeded:
+        raise
+    except Exception as exc:
+        status = getattr(exc, "status_code", 0) or 0
+        providers.record("groq", name, start, status=status)
+        raise LLMUnavailable(f"Groq request failed ({'HTTP ' + str(status) if status else type(exc).__name__}).") from exc
 
 
 def local_tool_selection(messages, tools, byte_budget):
@@ -805,7 +870,7 @@ def _gemini_generate(role: str, contents: Any, config: Any, *, native=False):
         if v is not None:
             kw[k] = v
     cfg = load_config()
-    name = cfg.get("gemini", {}).get("text_model", "")
+    name = cfg.get("gemini", {}).get("vision_model" if role == "vision" else "text_model", "")
     if not name:
         raise LLMUnavailable("Gemini text model is not configured.")
     retries = max(0, min(int(cfg.get("gemini", {}).get("max_retries", 2)), 5))

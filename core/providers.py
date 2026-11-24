@@ -85,6 +85,10 @@ def initialize(name, cfg):
         if name == "gemini":
             from google import genai
             client = genai.Client(api_key=key, http_options={"timeout": int(cfg["gemini"].get("timeout_s", 60) * 1000)})
+        elif name == "groq":
+            import importlib
+            Groq = importlib.import_module("groq").Groq
+            client = Groq(api_key=key, timeout=float(cfg.get("timeout_s", 60)), max_retries=0)
         else:
             raise ValueError("Unknown provider")
     except Exception:

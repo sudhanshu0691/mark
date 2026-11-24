@@ -10,11 +10,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 LEGACY = BASE_DIR / "config" / "api_keys.json"
 RUNTIME_ENV = BASE_DIR / "config" / "runtime.env"
 _ENV = {
+    "groq": "GROQ_API_KEY",
     "gemini": "GEMINI_API_KEY",
     "whatsapp": "MARK_WHATSAPP_TOKEN",
     "smtp_password": "SMTP_PASSWORD",
 }
 _JSON_KEYS = {
+    "groq": "groq_api_key",
     "gemini": "gemini_api_key",
     "whatsapp": "whatsapp_token",
     "smtp_password": "smtp_password",

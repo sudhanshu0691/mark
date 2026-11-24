@@ -81,7 +81,7 @@ def run_goal(goal: str, api_key: str = "", declarations: list[dict] | None = Non
     if workflow:
         log("[plugin router] " + workflow)
     system = SYSTEM + (f"\n\n{workflow}" if workflow else "") + (f"\n\nCONTEXT:\n{context}" if context else "")
-    messages: list[dict] = list(history or []) + [{"role": "user", "content": f"GOAL: {goal}"}]
+    messages: list[dict] = [{**item, "_local_only": True} for item in (history or [])] + [{"role": "user", "content": f"GOAL: {goal}"}]
     trace: list[str] = []
     recoveries: list[str] = []
     checkpoints: list[str] = []
