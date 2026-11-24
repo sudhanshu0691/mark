@@ -3,7 +3,7 @@ Mark decision brain.
 
 For a multi-step goal ("install VS Code, then open it and tell Rahul on WhatsApp")
 this runs a plan -> act -> VERIFY -> re-plan loop using the configured provider (core/llm.py,
-Ollama by default) using the same tools Mark has.
+Groq by default) using the same tools Mark has.
 
 The verify step is enforced here in code (core/verify.py), not left to the model:
 every world-changing tool call is independently checked (file exists / window open /
