@@ -22,6 +22,7 @@ WANT = [
     ("keyring", "OS credential storage", False),
     ("numpy", "UI math", False),
     ("sounddevice", "microphone", False),
+    ("groq", "Groq SDK", False),
     ("google.genai", "Gemini SDK for the voice runtime", False),
     ("psutil", "system telemetry", False),
     ("requests", "web calls", False),
@@ -160,6 +161,7 @@ def test_gemini() -> int:
 def main() -> int:
     import argparse as _ap
     ap = _ap.ArgumentParser()
+    ap.add_argument("--dependencies-ready", action="store_true", help="skip dependency install after uv sync")
     ap.add_argument("--doctor", action="store_true", help="diagnose only, install nothing")
     ap.add_argument("--test-gemini", action="store_true", help="test the configured Gemini API key")
     ap.add_argument("--no-playwright", action="store_true", help="skip the ~170MB chromium download")
@@ -185,11 +187,12 @@ def main() -> int:
     if sys.prefix == sys.base_prefix:
         print("NOTE: running outside a venv. Continuing anyway (the .bat normally makes one).")
 
-    print("Installing requirements...")
-    ok, why = pip_install(sys.executable, HERE / "requirements.txt")
-    if not ok:
-        print(f"\nINSTALL FAILED:\n{why}")
-        return 1
+    if not args.dependencies_ready:
+        print("Installing requirements...")
+        ok, why = pip_install(sys.executable, HERE / "requirements.txt")
+        if not ok:
+            print(f"\nINSTALL FAILED:\n{why}")
+            return 1
 
     if not args.no_playwright:
         print("Installing Playwright browser (chromium only, ~170MB)...")
