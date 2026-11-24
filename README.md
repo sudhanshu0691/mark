@@ -21,9 +21,9 @@ For a console launch or a diagnostic check use the project interpreter.
 
 ## Models and voice
 
-Ollama handles typed requests locally. Install Ollama, then run `.venv\Scripts\python.exe -m core.llm pull` to download the configured models. Text and coding use `qwen3:4b`, while image questions use `qwen2.5vl:3b`. Gemini Live handles optional microphone voice and requires a Gemini key and network access.
+Typed requests use automatic Groq routing with Gemini fallback. The configured routes use Qwen3.8 27B for conversation, fast responses, tool selection and memory, GPT-OSS 120B for planning and coding, and Gemini 3.1 Flash-Lite for vision and fallback. Each provider applies its own account limits. Model availability and eligibility depend on your provider account.
 
-Type **mark status** for runtime diagnostics. The `offline` profile uses local tools and Ollama, and disables Gemini cloud inference. Local speech can be installed separately.
+Type **mark status** for runtime diagnostics. The `offline` profile runs supported local commands and disables cloud inference. Install optional local speech separately if needed.
 
 ```powershell
 .\.venv\Scripts\python.exe setup.py --offline-speech
@@ -31,15 +31,23 @@ $env:MARK_PROFILE = 'offline'
 .\.venv\Scripts\python.exe main.py
 ```
 
-Gemini Live keeps the latest session handle in memory and restores recent voice dialogue from SQLite when a fresh session is needed. Typed follow-ups use the same database. `share_history_with_cloud` opts into sharing stored typed history and profile context. Clear saved turns from **Panels & layout → Clear saved conversation history**. Close the app to end its current Live session.
+Gemini Live requires a Gemini credential and network access. SQLite keeps typed and voice transcripts, including interrupted turns. Enable `share_history_with_cloud` in `config/llm.json` to share completed conversation history with cloud models. The **Clear saved conversation history** menu action deletes local saved turns.
 
-Cloud text requests support `stream_text`. Set `cloud_limits.requests_per_day` to an application limit per provider for text requests. Zero leaves the daily limit disabled. The planner also uses `requests_per_task`. These limits apply separately from provider billing and Gemini Live audio sessions.
+`cloud_limits.requests_per_task` bounds provider requests during one task. Set `requests_per_day` to zero to rely on provider daily quotas. Desktop and camera cloud analysis requires local confirmation.
+
+### LiveKit desktop sharing
+
+Set `LIVEKIT_REMOTE_IDENTITY` to the authorized remote identity and enable `MARK_LIVEKIT_DESKTOP_VIDEO=1` on the desktop. In a connected LiveKit session, request **start desktop video 1080p monitor 1** and approve the dialog on the desktop. Use **720p** or another connected monitor number as needed. The header shows **Stop sharing** during the share. Disconnecting ends the share and a new session requires fresh consent. The optional `MARK_LIVEKIT_DESKTOP_PREVIEW=1` enables the lightweight **start desktop preview** command.
+
+### Trusted plugins
+
+MARK verifies bundled plugin fingerprints before importing Python code. Review external plugins before granting them native access. Record approved relative plugin paths and lowercase SHA-256 digests in local `config/trusted_plugins.json`. The digest uses UTF-8 source bytes with CRLF converted to LF. Removing the entry revokes local approval. Untrusted plugins are blocked because an OS sandbox is unavailable.
 
 ## What is in here
 | Folder / file | What it does |
 | --- | --- |
 | `main.py`, `ui.py` | assistant runtime and native PySide6 dashboard |
-| `core/llm.py` | text and tool-call routing for Ollama and Gemini |
+| `core/llm.py` | text and tool-call routing for Groq and Gemini |
 | `core/brain.py`, `core/verify.py` | plan -> act -> **verify** loop; the verifier is enforced in code |
 | `actions/` | user-facing actions; `actions/phone/` contains the call-answering subsystem |
 | `actions/viz/` | internal visualization library for project analysis, UML / C4 / ERD / ISO 5807 diagrams, sequences and DXF drawings |
@@ -54,7 +62,7 @@ Cloud text requests support `stream_text`. Set `cloud_limits.requests_per_day` t
 
 Never commit private config such as `config/api_keys.json`, `config/contacts.json`, `config/permissions.json`, `memory/` or runtime `data/`.
 
-Engineering evidence is in the [audit](docs/REAL_AUDIT_REPORT.md), [architecture](docs/ARCHITECTURE.md), [performance measurements](docs/PERFORMANCE_REPORT.md), [test results](docs/TEST_REPORT.md), [dependency inventory](docs/DEPENDENCY_AUDIT.md), [security review](docs/SECURITY_REVIEW.md), and [change log](docs/CHANGELOG_MARK.md).
+See the [prior audit](docs/REAL_AUDIT_REPORT.md) for historical engineering context.
 
 Presentation preparation content is in [MARK_PPT_COMPLETE_DETAILS.md](docs/MARK_PPT_COMPLETE_DETAILS.md).
 
