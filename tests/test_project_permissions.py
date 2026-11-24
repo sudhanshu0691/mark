@@ -1,9 +1,13 @@
 ﻿import json
+from pathlib import Path
 from core import permissions
 from actions import fs_full
 
 
 def test_project_source_edits_require_opt_in_and_keep_private_files_blocked(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, 'home', classmethod(lambda cls, home=tmp_path: home))
+    tmp_path = tmp_path / 'Downloads'
+    tmp_path.mkdir()
     monkeypatch.setattr(permissions, 'BASE_DIR', tmp_path)
     policy = tmp_path / 'permissions.json'
     monkeypatch.setattr(permissions, 'PERM_FILE', policy)

@@ -44,12 +44,12 @@ if sys.platform == "win32":
 import numpy as np
 
 from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import (QCloseEvent, QColor, QFont, QImage, QPainter, QPen, QPixmap, QPolygonF,
-                           QRadialGradient, QShowEvent, QTransform)
+from PySide6.QtGui import (QCloseEvent, QColor, QFont, QImage, QKeySequence, QPainter, QPen, QPixmap, QPolygonF,
+                           QRadialGradient, QShortcut, QShowEvent)
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel,
     QLineEdit, QMainWindow, QMenu, QMessageBox, QProgressBar, QPlainTextEdit, QPushButton,
-    QTextEdit, QVBoxLayout, QWidget, QWidgetAction,
+    QSlider, QTextEdit, QVBoxLayout, QWidget, QWidgetAction,
 )
 
 from core.telemetry import TELEMETRY
@@ -154,6 +154,7 @@ class _Header(QFrame):
         self.panel.move(x, y)
 
     def mouseReleaseEvent(self, e):
+        e.accept()
         if self._off is not None:
             self._off = None
             self.setCursor(Qt.CursorShape.OpenHandCursor)
@@ -185,6 +186,7 @@ class _Grip(QLabel):
         self.panel.resize(w, h)
 
     def mouseReleaseEvent(self, e):
+        e.accept()
         if self._start is not None:
             self._start = None
             self.panel.geometry_changed.emit(self.panel.key)
@@ -619,6 +621,7 @@ class MarkUI(QMainWindow):
     def __init__(self, face_path: str = "", size=None):
         self.app = QApplication.instance() or QApplication(sys.argv)
         super().__init__()
+        self._face_path = face_path
         self._bridge.connect(self._dispatch_ui, Qt.ConnectionType.QueuedConnection)
         self.name = "MARK"
         self.assistant_name = self.name
@@ -656,6 +659,7 @@ class MarkUI(QMainWindow):
         self.on_text_command = None
         self.on_interrupt = None
         self.on_call_action = None
+        self.plugin_manager = None
         self.announce_vision = None
         self._win = self
         self.root = self
@@ -669,6 +673,10 @@ class MarkUI(QMainWindow):
 
         cfg = self._read_cfg()
         prefs = cfg.get("mark_prefs", {})
+        try:
+            self.setWindowOpacity(max(0.3, min(1.0, float(prefs.get("opacity", 1.0)))))
+        except (TypeError, ValueError):
+            self.setWindowOpacity(1.0)
         self.auto_panels = bool(prefs.get("auto", True))
         self.layout_locked = bool(prefs.get("lock", False))
         self._build_ui(cfg)
@@ -676,6 +684,8 @@ class MarkUI(QMainWindow):
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
         self._save_timer.timeout.connect(self._persist)
+        self._opacity_shortcut = QShortcut(QKeySequence("F8"), self)
+        self._opacity_shortcut.activated.connect(self._adjust_opacity)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh_status)
         self._timer.start(1500)
@@ -738,7 +748,7 @@ class MarkUI(QMainWindow):
         self._save_cfg(
             mark_layout={k: [round(v, 4) for v in f] for k, f in self.stage.fracs.items()},
             mark_panels={k: p.isVisible() for k, p in self.stage.panels.items()},
-            mark_prefs={"auto": self.auto_panels, "lock": self.layout_locked},
+            mark_prefs={"auto": self.auto_panels, "lock": self.layout_locked, "opacity": self.windowOpacity()},
         )
 
     def _schedule_save(self, *_):
@@ -789,7 +799,7 @@ class MarkUI(QMainWindow):
         stop.setObjectName("danger")
         stop.setStyleSheet("QPushButton{color:#FCA5A5;border-color:#7F1D1D;}")
         header.addWidget(stop)
-        self.menu_button = self._icon_button("≡", "Panels & layout", self._open_menu)
+        self.menu_button = self._icon_button("⋮", "Menu", self._open_menu)
         header.addWidget(self.menu_button)
         root.addLayout(header)
 
@@ -987,6 +997,9 @@ class MarkUI(QMainWindow):
 
     def _open_menu(self) -> None:
         menu = QMenu(self)
+        menu.addAction("Plugins", self._open_plugins)
+        menu.addAction("Window opacity (F8)", self._adjust_opacity)
+        menu.addSeparator()
         head = QLabel("  PANELS  —  switch on only what you need")
         head.setObjectName("section")
         ha = QWidgetAction(menu)
@@ -1007,6 +1020,56 @@ class MarkUI(QMainWindow):
         menu.addAction("Reset layout", self._reset_layout)
         menu.addAction("Clear saved conversation history", self._clear_history)
         menu.exec(self.menu_button.mapToGlobal(self.menu_button.rect().bottomRight()) - self._menu_offset(menu))
+
+    def _adjust_opacity(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Window opacity")
+        layout = QVBoxLayout(dialog)
+        label = QLabel()
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setRange(30, 100)
+        slider.setValue(round(self.windowOpacity() * 100))
+        def update(value):
+            label.setText(f"Opacity: {value}%")
+            self.setWindowOpacity(value / 100)
+            self._schedule_save()
+        slider.valueChanged.connect(update)
+        label.setText(f"Opacity: {slider.value()}%")
+        layout.addWidget(label)
+        layout.addWidget(slider)
+        dialog.exec()
+
+    def _open_plugins(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("MARK Plugins")
+        layout = QVBoxLayout(dialog)
+        title = QLabel("PLUGINS")
+        title.setObjectName("brand")
+        search = QLineEdit()
+        search.setPlaceholderText("Search installed plugins")
+        details = QPlainTextEdit()
+        details.setReadOnly(True)
+        def refresh():
+            manager = self.plugin_manager
+            if manager is None:
+                details.setPlainText("Plugin manager is not available yet.")
+                return
+            needle = search.text().strip().lower()
+            rows = manager.describe().splitlines()
+            details.setPlainText("\n".join(row for row in rows if needle in row.lower()) or "No matching plugins.")
+        search.textChanged.connect(refresh)
+        refresh_button = QPushButton("Refresh status")
+        refresh_button.clicked.connect(refresh)
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(dialog.close)
+        layout.addWidget(title)
+        layout.addWidget(search)
+        layout.addWidget(details, 1)
+        layout.addWidget(refresh_button)
+        layout.addWidget(close_button)
+        refresh()
+        dialog.showMaximized()
+        dialog.exec()
 
     @staticmethod
     def _menu_offset(menu: QMenu):
@@ -1191,12 +1254,14 @@ class MarkUI(QMainWindow):
         self._post(update)
 
     def show_work(self, title: str, lines: list[str] | None = None, seconds: float = 8.0) -> None:
+        del seconds
         self.write_log(f"WORK: {title} — {'; '.join(lines or [])}")
 
     def work_log(self, line: str) -> None:
         self.write_log(f"WORK: {line}")
 
     def show_work_image(self, image: bytes | str, caption: str = "", seconds: float = 12.0) -> None:
+        del seconds
         def show():
             pm = QPixmap()
             if isinstance(image, (bytes, bytearray)):
@@ -1219,6 +1284,7 @@ class MarkUI(QMainWindow):
         self._post(show)
 
     def show_screen_preview(self, img_bytes: bytes, seconds: float = 6.0) -> None:
+        del seconds
         self.show_camera_frame(img_bytes)
 
     def add_notification(self, note: dict) -> None:
@@ -1254,7 +1320,7 @@ class MarkUI(QMainWindow):
     # ---- camera --------------------------------------------------------------------------
     def show_camera_frame(self, img_bytes: bytes | None) -> None:
         # Camera capture remains available without a live preview panel.
-        pass
+        del img_bytes
 
     def show_camera_status(self, status: str) -> None:
         if any(word in str(status).upper() for word in ("ERROR", "FAILED")):

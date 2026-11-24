@@ -41,8 +41,24 @@ import threading
 import time
 import json
 import traceback
+import importlib
+import logging
 from datetime import datetime
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+# LiveKit imports for real-time communication
+try:
+    livekit_api = importlib.import_module("livekit.api")
+    importlib.import_module("livekit.agents")
+    importlib.import_module("livekit.agents.pipeline")
+    importlib.import_module("livekit.plugins")
+    LIVEKIT_AVAILABLE = True
+except ImportError:
+    livekit_api = None
+    LIVEKIT_AVAILABLE = False
+    # LiveKit will be enabled if configured later
 
 
 def _install_first_run_requirements() -> None:
@@ -110,13 +126,12 @@ from actions.background_monitor import (
     add_monitor, remove_monitor, list_monitors, check_all as monitor_check_all,
 )
 from memory.config_manager     import get_brief_enabled
-from core.result import coerce_side_effect, failed as _failed, ActionResult
+from core.result import coerce_side_effect, failed as _failed
 from core.tools import NEW_DECLARATIONS, NATIVE, NEW_NAMES
 from core.plugins import PluginManager, PluginContext
 from core import brain as _brain
 from core.task_manager import TASKS
 from actions.notifications import WATCHER as NOTIF_WATCHER, describe as _describe_note
-from actions import whatsapp as _wa_mod
 
 
 def get_base_dir():
@@ -182,6 +197,56 @@ def _is_live_inactivity_error(error: BaseException) -> bool:
     return "inactivity" in detail and ("1008" in detail or "session closed" in detail)
 
 
+# LiveKit configuration and token generation
+def _load_livekit_config() -> dict:
+    """Load LiveKit configuration from config file or environment."""
+    import configparser
+    from dotenv import load_dotenv
+
+    load_dotenv(BASE_DIR / "config" / "runtime.env", override=False)
+    load_dotenv(BASE_DIR / ".env", override=False)
+    config_path = BASE_DIR / "config" / "livekit.ini"
+
+    cfg = configparser.ConfigParser()
+    cfg.read(config_path)
+
+    livekit_cfg = {}
+    if "livekit" in cfg:
+        livekit_cfg["url"] = cfg.get("livekit", "url", fallback="")
+        livekit_cfg["api_key"] = cfg.get("livekit", "api_key", fallback="")
+        livekit_cfg["api_secret"] = cfg.get("livekit", "api_secret", fallback="")
+        livekit_cfg["room_name"] = cfg.get("livekit", "room_name", fallback="")
+        livekit_cfg["participant_name"] = cfg.get("livekit", "participant_name", fallback="")
+
+    # Also check environment variables
+    if not livekit_cfg.get("url"):
+        livekit_cfg["url"] = os.environ.get("LIVEKIT_URL", "http://localhost:7880")
+    if not livekit_cfg.get("api_key"):
+        livekit_cfg["api_key"] = os.environ.get("LIVEKIT_API_KEY", "")
+    if not livekit_cfg.get("api_secret"):
+        livekit_cfg["api_secret"] = os.environ.get("LIVEKIT_API_SECRET", "")
+    if not livekit_cfg.get("room_name"):
+        livekit_cfg["room_name"] = os.environ.get("LIVEKIT_ROOM", "mark-room")
+    if not livekit_cfg.get("participant_name"):
+        livekit_cfg["participant_name"] = os.environ.get("LIVEKIT_PARTICIPANT", "mark-user")
+
+    return livekit_cfg
+
+
+def _generate_livekit_token(room_name: str, participant_name: str) -> str:
+    """Generate an authenticated LiveKit access token."""
+    livekit_cfg = _load_livekit_config()
+
+    from livekit import api
+
+    if not livekit_cfg["api_key"] or not livekit_cfg["api_secret"]:
+        raise ValueError("LiveKit API key and secret are required")
+    return (api.AccessToken(livekit_cfg["api_key"], livekit_cfg["api_secret"])
+            .with_identity(participant_name)
+            .with_grants(api.VideoGrants(room_join=True, room=room_name))
+            .to_jwt())
+
+
 async def _wait_for_microphone(ui) -> None:
     """Avoid reconnecting an idle session repeatedly while the microphone is muted."""
     while ui.muted:
@@ -215,18 +280,6 @@ def _clean_transcript(text: str) -> str:
     text = _CTRL_RE.sub("", text)
     text = re.sub(r"[\x00-\x08\x0b-\x1f]", "", text)
     return text.strip()
-
-# Tools whose effect is visible on screen -> MARK grabs a live preview after running
-# them, so you can SEE whether what it claims actually happened.
-_SCREEN_VERIFIED_TOOLS = {
-    "open_app", "file_controller", "file_processor", "whatsapp", "send_message",
-    "software_manager", "window_manager", "browser_control", "desktop_control",
-    "computer_control", "computer_settings", "reminder",
-    "ppt_studio", "presentation", "media_studio", "hardware_control",
-    "app_integration", "message_delivery", "screen_read", "notifications",
-    "code_helper", "dev_agent", "youtube_video",
-}
-
 
 TOOL_DECLARATIONS = [
     {"name": "gesture_mouse", "description": "Control webcam gesture mouse, enabled at startup when available. Actions: enable, disable, sensitivity_up, sensitivity_down, drag_on, drag_off, status.",
@@ -751,9 +804,80 @@ class MarkLive:
         self._note_queue: asyncio.Queue | None = None
         self._live_input_ready = False
         self._live_disabled = False
+        self._livekit_connected = False
+        self._livekit_worker = None
         self.plugins = PluginManager(PluginContext(
             ui=ui, speak=lambda t: self.speak(t), call_tool=lambda n, a: self._dispatch_sync(n, a)))
+        self.ui.plugin_manager = self.plugins
         self.plugins.on_change = self._plugins_changed.set
+
+    async def connect_livekit(self) -> bool:
+        """Connect to LiveKit server and start the agent worker.
+
+        Returns:
+            True if connection was successful
+        """
+        if self._livekit_connected:
+            logger.info("Already connected to LiveKit")
+            return True
+
+        if not LIVEKIT_AVAILABLE:
+            logger.warning("LiveKit SDK not available")
+            return False
+
+        try:
+            # Load LiveKit configuration
+            livekit_cfg = _load_livekit_config()
+            room_name = livekit_cfg.get("room_name", "mark-room")
+            participant_name = livekit_cfg.get("participant_name", "mark-user")
+            # Generate access token
+            self._livekit_token = _generate_livekit_token(room_name, participant_name)
+
+            # Create the LiveKit agent worker
+            from core._llm_gateway import LocalLLMGateway
+
+            # Initialize LLM gateway
+            llm_gateway = LocalLLMGateway(config_path="core/prompt.txt")
+
+            # Initialize STT engine
+            from core._speech_stt import STTEngine
+            stt_engine = STTEngine(
+                model_size="base",
+                device="cpu",
+                compute_type="int8",
+                language=None,  # auto-detect
+            )
+
+            # Initialize TTS engine
+            from core._tts import PiperTTSEngine
+            tts_engine = PiperTTSEngine()
+
+            # Create the LiveKit agent worker
+            from core._livekit_worker import LiveKitAgentWorker
+            self._livekit_worker = LiveKitAgentWorker(
+                markdown_adapter=self,
+                llm_gateway=llm_gateway,
+                stt_engine=stt_engine,
+                tts_engine=tts_engine,
+            )
+
+            # Worker.start requires an already connected room and participant.
+            # Do not report a connection until that integration is implemented.
+            raise NotImplementedError("LiveKit room connection is not implemented")
+
+        except Exception as e:
+            logger.error(f"Failed to connect to LiveKit: {e}", exc_info=True)
+            self._livekit_connected = False
+            return False
+
+    async def disconnect_livekit(self) -> None:
+        """Stop the worker and clear its connection state."""
+        try:
+            if self._livekit_worker is not None:
+                await self._livekit_worker.stop()
+        finally:
+            self._livekit_worker = None
+            self._livekit_connected = False
 
     def _ui_gesture_action(self, action: str) -> None:
         if not self._loop or not self._loop.is_running():
@@ -1470,6 +1594,7 @@ class MarkLive:
                 print("[MARK] Audio queue full; dropping microphone chunk.")
 
         def callback(indata, frames, time_info, status):
+            del frames, time_info, status
             with self._speaking_lock:
                 mark_speaking = self._is_speaking
             if not mark_speaking:
@@ -1589,7 +1714,7 @@ class MarkLive:
                             # Vision injection: model finished tool-response turn → now send the image
                             if self._pending_vision and self.session:
                                 import base64 as _b64
-                                img_b, mime_t, question, angle = self._pending_vision
+                                img_b, mime_t, question = self._pending_vision[:3]
                                 self._pending_vision = None
                                 b64 = _b64.b64encode(img_b).decode("ascii")
                                 await self.session.send_client_content(  # type: ignore
@@ -1983,8 +2108,13 @@ class MarkLive:
 
     def _enable_gesture_mouse(self):
         self.gesture_mouse.enable()
+
+        def on_gesture_error(error):
+            del error
+            self.gesture_mouse.disable("OFF: CAMERA UNAVAILABLE")
+
         self._gesture_source.subscribe(self.gesture_mouse, self.gesture_mouse.submit,
-            lambda error: self.gesture_mouse.disable("OFF: CAMERA UNAVAILABLE"))
+            on_gesture_error)
 
     def _start_default_camera_features(self):
         self.ui._post(self.ui.start_camera_stream)

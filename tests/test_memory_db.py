@@ -33,3 +33,19 @@ def test_concurrent_writes(tmp_path, monkeypatch):
     for t in ts: t.join()
     mem = db.load_memory_dict()
     assert len(mem["notes"]) == 20
+
+
+def test_conversation_history_is_not_pruned_or_truncated(tmp_path, monkeypatch):
+    import sqlite3
+    import memory.db as db
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "history.db")
+    monkeypatch.setattr(db, "LEGACY_LONG_TERM", tmp_path / "missing-long.json")
+    monkeypatch.setattr(db, "LEGACY_CONVERSATION", tmp_path / "missing-history.json")
+    long_text = "x" * 13000
+    db.append_conversation_turn(long_text, "first")
+    for i in range(100):
+        db.append_conversation_turn(str(i), "answer")
+    with sqlite3.connect(db.DB_PATH) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM conversation_turns").fetchone()[0] == 101
+        assert conn.execute("SELECT user FROM conversation_turns ORDER BY id LIMIT 1").fetchone()[0] == long_text
+    assert len(db.load_conversation_turns()) == 100

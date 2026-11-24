@@ -21,7 +21,7 @@ DESCRIPTION = ("Check whether a message was delivered/read on WhatsApp, Telegram
                "reading the real window/screen indicators. Returns PASS only when seen.")
 METADATA = {"version": "1.0.0",
             "capabilities": ["delivery", "receipt", "whatsapp", "telegram", "signal", "status"],
-            "permissions": [], "timeout": 45}
+            "permissions": ["open_app"], "timeout": 45}
 
 DECLARATION = {
     "name": "message_delivery",

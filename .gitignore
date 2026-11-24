@@ -22,6 +22,7 @@ config/phone.json
 config/permissions.json
 config/.env
 config/runtime.env
+config/livekit.ini
 .mark-test-*/
 .env
 

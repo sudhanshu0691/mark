@@ -45,10 +45,7 @@ def _gemini_search(query: str) -> str:
 
 
 def _ddg_search(query: str, max_results: int = 6) -> list[dict]:
-    try:
-        DDGS = import_module("ddgs").DDGS
-    except ImportError:
-        DDGS = import_module("duckduckgo_search").DDGS
+    DDGS = import_module("ddgs").DDGS
 
     results = []
     with DDGS() as ddgs:
@@ -63,10 +60,7 @@ def _ddg_search(query: str, max_results: int = 6) -> list[dict]:
 
 def _ddg_news(query: str, max_results: int = 8) -> list[dict]:
     """DDG news search — returns actual articles, not website homepages."""
-    try:
-        DDGS = import_module("ddgs").DDGS
-    except ImportError:
-        DDGS = import_module("duckduckgo_search").DDGS
+    DDGS = import_module("ddgs").DDGS
 
     results = []
     try:

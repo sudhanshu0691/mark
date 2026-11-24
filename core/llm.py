@@ -25,6 +25,7 @@ MARK_LLM_BACKEND overrides the configured provider.
 from __future__ import annotations
 
 import base64
+import asyncio
 from contextlib import contextmanager
 import io
 import json
@@ -290,6 +291,104 @@ def _clean(text: str) -> str:
     return _THINK_RE.sub("", text or "").strip()
 
 
+class InferenceProvider:
+    """Base class for all inference providers."""
+
+    def __init__(self, cfg: dict | None = None):
+        self.cfg = cfg or load_config()
+        self.health: dict[str, Any] = {"ok": False, "message": "not initialized"}
+        self.stats: dict[str, Any] = {"requests": 0, "tokens": 0, "latency_ms": 0}
+
+    def is_available(self) -> bool:
+        return self.health.get("ok", False)
+
+    def health_check(self) -> dict:
+        return self.health
+
+    def get_capabilities(self) -> dict[str, bool]:
+        return {"supports_tools": False, "supports_vision": False, "supports_streaming": False, "supports_json": False}
+
+    async def cancel_request(self) -> None:
+        pass
+
+    def get_model_for_role(self, role: str) -> str:
+        raise NotImplementedError
+    
+    async def generate(self, messages: list[dict], **kwargs: Any) -> dict:
+        raise NotImplementedError
+    
+    async def chat(self, messages: list[dict], **kwargs: Any) -> dict:
+        return await self.generate(messages, **kwargs)
+
+
+# ── Ollama Provider ─────────────────────────────────────────────────────────
+
+class OllamaProvider(InferenceProvider):
+    def __init__(self, cfg: dict | None = None):
+        super().__init__(cfg)
+        self.host = self._ensure_host(cfg.get("host", "http://127.0.0.1:11434")) if cfg else "http://127.0.0.1:11434"
+        self.models: list = []
+        self._loaded_models: set = set()
+
+    def _ensure_host(self, host: str) -> str:
+        host = str(host).strip()
+        return (host if host.startswith("http") else "http://" + host).rstrip("/")
+    
+    def get_model_for_role(self, role: str) -> str:
+        cfg = load_config()
+        return cfg.get(f"{role}_model") or cfg["text_model"]
+    
+    def get_capabilities(self) -> dict[str, bool]:
+        return {"supports_tools": True, "supports_vision": True,
+                "supports_streaming": True, "supports_json": True}
+    
+    def health_check(self) -> dict:
+        return health()
+    
+    async def generate(self, messages: list[dict], **kwargs: Any) -> dict:
+        role = kwargs.get("role", "text")
+        result = await asyncio.to_thread(
+            chat_raw,
+            messages,
+            role,
+            kwargs.get("tools"),
+            kwargs.get("temperature"),
+            kwargs.get("max_tokens"),
+            kwargs.get("model"),
+            kwargs.get("json_mode", False),
+        )
+        return result
+
+
+class GeminiProvider(InferenceProvider):
+    def __init__(self, cfg: dict | None = None):
+        super().__init__(cfg)
+    
+    def get_model_for_role(self, role: str) -> str:
+        cfg = load_config().get("gemini", {})
+        return cfg.get(f"{role}_model") or cfg.get("text_model", "")
+    
+    def get_capabilities(self) -> dict[str, bool]:
+        return {"supports_tools": True, "supports_vision": True,
+                "supports_streaming": True, "supports_json": True}
+    
+    def health_check(self) -> dict:
+        return gemini_health()
+    
+    async def generate(self, messages: list[dict], **kwargs: Any) -> dict:
+        role = kwargs.get("role", "text")
+        result = await asyncio.to_thread(
+            _gemini_chat,
+            messages,
+            role,
+            kwargs.get("tools"),
+            kwargs.get("temperature"),
+            kwargs.get("max_tokens"),
+            kwargs.get("json_mode", False),
+        )
+        return result
+
+
 # --------------------------------------------------------------------------- web grounding
 def web_context(query: str, n: int | None = None) -> str:
     """Free web search (DuckDuckGo via ddgs) used instead of Gemini's google_search tool."""
@@ -298,10 +397,7 @@ def web_context(query: str, n: int | None = None) -> str:
     if not q:
         return ""
     try:
-        try:
-            from ddgs import DDGS
-        except ImportError:                                  # old package name
-            from duckduckgo_search import DDGS               # type: ignore
+        from ddgs import DDGS
         d = DDGS()
         use_news = bool(re.search(r"\b(news|headline|headlines|latest|breaking)\b", q, re.I))
         rows = list(d.news(q, max_results=n)) if use_news else list(d.text(q, max_results=n))

@@ -6,6 +6,9 @@ survives cloud reconnects, WebSocket/frontend reconnects and application
 restarts. A ``conversations`` table scopes turns to a conversation id; calls
 that do not supply a conversation id fall back to the single active
 conversation, keeping existing call sites working unchanged.
+
+FTS5 index for efficient local retrieval of conversation content is created
+automatically on first init if SQLite supports it.
 """
 from __future__ import annotations
 
@@ -27,6 +30,8 @@ _lock = threading.RLock()
 CATEGORIES = ("identity", "preferences", "projects", "relationships", "wishes", "notes")
 
 MAX_CONVERSATION_TURNS = 100
+
+FTS_ENABLED = False
 
 
 def _connect() -> sqlite3.Connection:
@@ -79,13 +84,54 @@ def init_db() -> None:
                 rating TEXT,
                 text TEXT
             );
+            CREATE TABLE IF NOT EXISTS task_checkpoints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                status TEXT NOT NULL,
+                checkpoint_at TEXT NOT NULL
+            );
             """)
             _ensure_columns(conn)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_turns_conversation_id ON conversation_turns(conversation_id, id)")
             _ensure_default_conversation(conn)
+            _ensure_fts(conn)
             conn.commit()
         finally:
             conn.close()
     _migrate_if_needed()
+
+
+def _ensure_fts(conn: sqlite3.Connection) -> None:
+    global FTS_ENABLED
+    try:
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS conversation_turns_fts "
+            "USING fts5(user, assistant, content='conversation_turns', content_rowid='id')"
+        )
+        conn.executescript("""
+            CREATE TRIGGER IF NOT EXISTS conversation_turns_fts_insert
+            AFTER INSERT ON conversation_turns BEGIN
+                INSERT INTO conversation_turns_fts(rowid, user, assistant)
+                VALUES (new.id, new.user, new.assistant);
+            END;
+            CREATE TRIGGER IF NOT EXISTS conversation_turns_fts_delete
+            AFTER DELETE ON conversation_turns BEGIN
+                INSERT INTO conversation_turns_fts(conversation_turns_fts, rowid, user, assistant)
+                VALUES ('delete', old.id, old.user, old.assistant);
+            END;
+            CREATE TRIGGER IF NOT EXISTS conversation_turns_fts_update
+            AFTER UPDATE ON conversation_turns BEGIN
+                INSERT INTO conversation_turns_fts(conversation_turns_fts, rowid, user, assistant)
+                VALUES ('delete', old.id, old.user, old.assistant);
+                INSERT INTO conversation_turns_fts(rowid, user, assistant)
+                VALUES (new.id, new.user, new.assistant);
+            END;
+        """)
+        conn.execute("INSERT INTO conversation_turns_fts(conversation_turns_fts) VALUES ('rebuild')")
+        FTS_ENABLED = True
+    except sqlite3.OperationalError:
+        FTS_ENABLED = False
 
 
 def _ensure_columns(conn: sqlite3.Connection) -> None:
@@ -468,14 +514,12 @@ def list_sessions():
             conn.close()
 
 
-MAX_CONVERSATION_TURNS = 100
-
-
 def append_conversation_turn(user, assistant, *, channel="voice", conversation_id=None):
     import datetime as _dt
     init_db()
     if conversation_id is None:
-        conversation_id = get_active_conversation()["id"] if get_active_conversation() else None
+        active = get_active_conversation()
+        conversation_id = active["id"] if active else None
     with _lock:
         conn = _connect()
         try:
@@ -483,11 +527,7 @@ def append_conversation_turn(user, assistant, *, channel="voice", conversation_i
                 "INSERT INTO conversation_turns(timestamp,user,assistant,channel,conversation_id) "
                 "VALUES (?,?,?,?,?)",
                 (_dt.datetime.now().isoformat(timespec="seconds"),
-                 user.strip()[:12000], assistant.strip()[:12000], channel, conversation_id))
-            conn.execute(
-                "DELETE FROM conversation_turns WHERE id IN "
-                "(SELECT id FROM conversation_turns ORDER BY id DESC LIMIT -1 OFFSET ?)",
-                (MAX_CONVERSATION_TURNS,))
+                 user.strip(), assistant.strip(), channel, conversation_id))
             conn.commit()
         finally:
             conn.close()

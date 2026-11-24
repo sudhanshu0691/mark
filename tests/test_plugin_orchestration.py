@@ -18,11 +18,15 @@ def test_plugin_delete_and_move_blocked():
 
 
 def test_workflow_passes_results_through_registered_plugins(tmp_path, monkeypatch):
+    from pathlib import Path
     from core.plugins import PluginContext, PluginManager
     from core import plugin_safety
     from core.paths import BASE_DIR
     # Real plugins and real files, with only the output directory redirected.
     import plugins.visualization as visualization
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls, home=tmp_path: home))
+    tmp_path = tmp_path / "Downloads"
+    tmp_path.mkdir()
     out_dir = tmp_path / "charts"
     monkeypatch.setattr(visualization, "VIZ_DIR", out_dir)
     monkeypatch.setattr(plugin_safety, "VIZ_DIR", out_dir)

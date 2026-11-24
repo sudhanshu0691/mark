@@ -69,7 +69,7 @@ class PluginContext:
         """Run any other Mark tool (open_app, file_controller, whatsapp ...)."""
         if not self._call_tool:
             return "[FAILED] tool bridge not ready"
-        if self.permissions and "*" not in self.permissions and name not in self.permissions:
+        if "*" not in self.permissions and name not in self.permissions:
             return f"[FAILED] permission denied for tool '{name}'"
         return self._call_tool(name, args or {})
 
@@ -96,6 +96,12 @@ class PluginManager:
         self._stop = threading.Event()
         self.on_change: Callable[[], None] | None = None
         PLUGIN_DIR.mkdir(exist_ok=True)
+
+    def _context_for(self, loaded: _Loaded) -> PluginContext:
+        from copy import copy
+        context = copy(self.ctx)
+        context.permissions = set(loaded.permissions)
+        return context
 
     # ── discovery ────────────────────────────────────────────────────────────
     def _files(self) -> list[Path]:
@@ -155,18 +161,23 @@ class PluginManager:
                 if not isinstance(decl, dict) or "name" not in decl or not callable(fn):
                     raise ValueError("each tool needs a 'declaration' dict with a name, and a callable 'run'")
                 self._validate_declaration(decl, path)
+                if decl["name"] in tools:
+                    raise ValueError(f"duplicate tool name '{decl['name']}'")
                 tools[decl["name"]] = {"declaration": decl, "run": fn}
             if not tools and not hasattr(mod, "on_notification"):
                 raise ValueError("plugin defines no tools (need DECLARATION+run or TOOLS)")
-            self.loaded[getattr(mod, "NAME", pname)] = _Loaded(getattr(mod, "NAME", pname), path, mod, tools)
-            loaded = self.loaded[getattr(mod, "NAME", pname)]
+            name = getattr(mod, "NAME", pname)
+            if name in self.loaded:
+                raise ValueError(f"duplicate plugin name '{name}'")
+            loaded = _Loaded(name, path, mod, tools)
             if hasattr(mod, "health_check"):
-                health = mod.health_check(self.ctx)
+                health = mod.health_check(self._context_for(loaded))
                 loaded.health = "healthy" if health is not False else "unhealthy"
             else:
                 loaded.health = "healthy"
             if hasattr(mod, "on_load"):
-                mod.on_load(self.ctx)
+                mod.on_load(self._context_for(loaded))
+            self.loaded[name] = loaded
             self.errors.pop(key, None)
         except Exception as e:
             self.errors[key] = f"{type(e).__name__}: {e}"
@@ -191,7 +202,7 @@ class PluginManager:
     def _unload(self, l: _Loaded) -> None:
         try:
             if hasattr(l.module, "on_unload"):
-                l.module.on_unload(self.ctx)
+                l.module.on_unload(self._context_for(l))
         except Exception:
             pass
 
@@ -249,9 +260,7 @@ class PluginManager:
         try:
             def invoke() -> Any:
                 nparams = len(inspect.signature(fn).parameters)
-                from copy import copy
-                context = copy(self.ctx)
-                context.permissions = set(owner.permissions)
+                context = self._context_for(owner)
                 return fn(args, context) if nparams >= 2 else fn(args)
             pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"plugin-{owner.name}")
             try:
@@ -292,12 +301,12 @@ class PluginManager:
 
     def dispatch_notification(self, note: dict) -> None:
         with self._lock:
-            mods = [l.module for l in self.loaded.values() if hasattr(l.module, "on_notification")]
-        for m in mods:
+            mods = [l for l in self.loaded.values() if hasattr(l.module, "on_notification")]
+        for loaded in mods:
             try:
-                m.on_notification(note, self.ctx)
+                loaded.module.on_notification(note, self._context_for(loaded))
             except Exception as e:
-                print(f"[plugin] on_notification error in {m.__name__}: {e}")
+                print(f"[plugin] on_notification error in {loaded.name}: {e}")
 
     def notification_policy(self, note: dict) -> str:
         """Return the most restrictive policy requested by notification plugins."""
@@ -305,14 +314,14 @@ class PluginManager:
         selected = 0
         with self._lock:
             mods = [
-                l.module for l in self.loaded.values()
+                l for l in self.loaded.values()
                 if hasattr(l.module, "notification_policy")
             ]
-        for module in mods:
+        for loaded in mods:
             try:
-                policy = str(module.notification_policy(note, self.ctx)).lower().strip()
+                policy = str(loaded.module.notification_policy(note, self._context_for(loaded))).lower().strip()
             except Exception as e:
-                print(f"[plugin] notification_policy error in {module.__name__}: {e}")
+                print(f"[plugin] notification_policy error in {loaded.name}: {e}")
                 continue
             if policy in policies:
                 selected = max(selected, policies.index(policy))
