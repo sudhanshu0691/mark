@@ -60,7 +60,7 @@ if not %RC%==0 (
 where winget >nul 2>nul
 if errorlevel 1 echo NOTE: winget not found - install "App Installer" from Microsoft Store so MARK can install apps.
 echo.
-echo Ensure Ollama is installed and run: "%VENV_PY%" -m core.llm pull
+echo Configure Groq and Gemini credentials before starting MARK.
 echo Done. Read SETUP.md for Windows settings, then double-click run_mark.bat
 pause
 

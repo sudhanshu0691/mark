@@ -140,7 +140,7 @@ def run_goal(goal: str, api_key: str = "", declarations: list[dict] | None = Non
                 try:
                     args = json.loads(args)
                 except ValueError:
-                    args = {}
+                    return "RESULT: FAILED\nNOT DONE: invalid tool argument JSON."
             if not isinstance(args, dict):
                 return "RESULT: FAILED\nNOT DONE: invalid tool argument object."
             args = dict(args)
@@ -193,7 +193,7 @@ def run_goal(goal: str, api_key: str = "", declarations: list[dict] | None = Non
                     log(f"[brain {step}] checkpoint -> {r[:110]}")
                 except Exception as e:
                     checkpoints.append(f"{name}: checkpoint failed ({type(e).__name__}: {e})")
-            messages.append({"role": "tool", "tool_name": name, "content": out[:2400]})
+            messages.append({"role": "tool", "tool_name": name, "tool_call_id": tc.get("id"), "content": out[:2400]})
 
     return ("RESULT: PARTIAL\nDONE: " + "; ".join(t for t in trace if "[DONE]" in t)[:600] +
             f"\nNOT DONE: stopped after {max_steps} steps without finishing the goal. Steps: " + " | ".join(trace[-6:]) +

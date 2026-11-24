@@ -523,6 +523,12 @@ def chat_raw(messages: list[dict], role: str = "text", tools: list[dict] | None 
         raise LLMUnavailable("Cloud inference is disabled in offline profile.")
     cloud_messages = [{k: v for k, v in msg.items() if k != "_local_only"}
                       for msg in messages if not msg.get("_local_only")]
+    # Keep the current tool exchange intact, but exclude prior dialogue by default.
+    if not cfg.get("share_history_with_cloud", False):
+        last_user = next((i for i in range(len(cloud_messages)-1, -1, -1)
+                          if cloud_messages[i].get("role") == "user"), -1)
+        if last_user >= 0:
+            cloud_messages = [m for m in cloud_messages[:last_user] if m.get("role") == "system"] + cloud_messages[last_user:]
     if role == "vision" and not cfg.get("allow_cloud_vision", False):
         raise LLMUnavailable("Cloud vision is not authorized.")
     if cfg.get("backend") == "gemini" or role == "vision":
@@ -567,7 +573,22 @@ def _groq_chat(messages, role, tools, temperature, max_tokens, json_mode):
         if providers.initialize("groq", cfg) != "CONFIGURED":
             raise LLMUnavailable("Groq client is unavailable.")
         client = providers.client_for("groq", key)
-    payload = {"model": name, "messages": messages, "max_completion_tokens": max_tokens or 512}
+    wire_messages = []
+    for msg in messages:
+        item = {"role": msg["role"], "content": msg.get("content", "")}
+        if msg.get("tool_calls"):
+            item["tool_calls"] = []
+            for call in msg["tool_calls"]:
+                fn = call["function"]
+                args = fn.get("arguments", {})
+                item["tool_calls"].append({"id": call["id"], "type": "function",
+                    "function": {"name": fn["name"], "arguments": args if isinstance(args, str) else json.dumps(args)}})
+        if msg["role"] == "tool":
+            if not msg.get("tool_call_id"):
+                raise LLMUnavailable("Missing cloud tool call ID.")
+            item["tool_call_id"] = msg["tool_call_id"]
+        wire_messages.append(item)
+    payload = {"model": name, "messages": wire_messages, "max_completion_tokens": max_tokens or 512}
     if temperature is not None:
         payload["temperature"] = temperature
     if tools:
@@ -866,6 +887,10 @@ def _gemini_generate(role: str, contents: Any, config: Any, *, native=False):
     name = cfg.get("gemini", {}).get("vision_model" if role == "vision" else "text_model", "")
     if not name:
         raise LLMUnavailable("Gemini text model is not configured.")
+    if cfg.get("free_tier_only", True) and name not in cfg.get("verified_free_models", []):
+        raise LLMUnavailable("Gemini model is not on the configured allowlist.")
+    if role == "vision" and not cfg.get("allow_cloud_vision", False):
+        raise LLMUnavailable("Cloud vision is not authorized.")
     retries = max(0, min(int(cfg.get("gemini", {}).get("max_retries", 2)), 5))
     backoffs = cfg.get("gemini", {}).get("retry_backoff_s", [2, 5])
     timeout_ms = int(max(1, float(cfg.get("gemini", {}).get("timeout_s", 60))) * 1000)
