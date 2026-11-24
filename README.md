@@ -4,7 +4,7 @@ A Windows-first multi-agent runtime with a native PySide6 dashboard, PC and brow
 
 ## Run on Windows
 
-Install 64-bit Python 3.11 or 3.12 and run the following in PowerShell from the project directory. Setup uses the Windows Python 3.11 constraints when applicable. MARK starts with the microphone muted. Use the microphone button for Gemini Live. Use the camera control to start camera monitoring.
+Install 64-bit Python 3.11 or 3.12 and run the following in PowerShell from the project directory. Setup uses the Windows Python 3.11 constraints when applicable. MARK starts with the microphone enabled for Gemini Live. Use the microphone button to mute or unmute it. Camera monitoring starts in the background without a live preview panel.
 
 ```powershell
 .\setup_windows.bat
@@ -56,6 +56,14 @@ Never commit private config such as `config/api_keys.json`, `config/contacts.jso
 
 Engineering evidence is in the [audit](docs/REAL_AUDIT_REPORT.md), [architecture](docs/ARCHITECTURE.md), [performance measurements](docs/PERFORMANCE_REPORT.md), [test results](docs/TEST_REPORT.md), [dependency inventory](docs/DEPENDENCY_AUDIT.md), [security review](docs/SECURITY_REVIEW.md), and [change log](docs/CHANGELOG_MARK.md).
 
+Presentation preparation content is in [MARK_PPT_COMPLETE_DETAILS.md](docs/MARK_PPT_COMPLETE_DETAILS.md).
+
 ## Local camera configuration
 
 To customize the vision camera, copy `vision_department/config/model_config.example.yaml` to `vision_department/config/model_config.yaml` and configure your device locally. The local configuration and enrolled face images are excluded from Git.
+
+## Optional gesture mouse
+
+Install the optional gesture stack with `.venv\Scripts\python.exe -m pip install -r requirements-gesture.txt` after normal setup. MediaPipe Hands requires NumPy 1.x, protobuf 4.x, and OpenCV below 4.12; this optional install changes the versions in the project environment and must not be combined with the default Windows constraints file.
+
+Gesture mouse and background camera monitoring start automatically when dependencies and the webcam are available. Say ?enable gesture mouse? or ?disable gesture mouse?; the header shows its state. An index finger moves the pointer; pinch thumb and index for a left click or thumb and middle for a right click. Raise index and middle and move them vertically to scroll. Say ?enable drag mode? before holding a left pinch to drag; release to drop. An open palm pauses control. A closed fist pauses mouse actions immediately; hold it for 0.8 seconds to stop gesture control. Camera loss disables gesture control. Gesture processing and camera monitoring are independent and share the webcam capture. Optional tuning values are documented in `config/runtime.example.env`.

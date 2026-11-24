@@ -166,6 +166,12 @@ def _keyword_score(text: str) -> tuple[str, float]:
 def match_local_command(text: str) -> tuple[str, dict] | None:
     """Match complete, unambiguous English or Hinglish commands."""
     command = " ".join(text.casefold().strip(" .!?").split())
+    gesture = command.removeprefix("mark, ").removeprefix("mark ")
+    gesture_commands = {"enable gesture mouse": "enable", "disable gesture mouse": "disable",
+                        "increase mouse sensitivity": "sensitivity_up", "decrease mouse sensitivity": "sensitivity_down",
+                        "enable drag mode": "drag_on", "disable drag mode": "drag_off"}
+    if gesture in gesture_commands:
+        return "gesture_mouse", {"action": gesture_commands[gesture]}
     if command in {"mark status", "provider status", "mark ka status"}:
         return "runtime_status", {}
     if command in {"system status", "system information", "system info", "system status batao"}:

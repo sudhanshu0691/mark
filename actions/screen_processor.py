@@ -246,21 +246,8 @@ def _capture_camera() -> tuple[bytes, str]:
     if not _CV2:
         raise RuntimeError("OpenCV (cv2) is not installed. Run: pip install opencv-python")
 
-    index   = _get_camera_index()
-    backend = _cv2_backend()
-    cap     = cv2.VideoCapture(index, backend)
-
-    if not cap.isOpened():
-        raise RuntimeError(f"Camera index {index} could not be opened.")
-
-    for _ in range(10):
-        cap.read()
-
-    ret, frame = cap.read()
-    cap.release()
-
-    if not ret or frame is None:
-        raise RuntimeError("Camera returned no frame.")
+    from actions.camera_source import CAMERA
+    frame = CAMERA.snapshot()
 
     if _PIL:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -420,15 +407,6 @@ class _VisionSession:
                             self._player.write_log(f"Mark: {full}")
                             print(f"[Vision] 💬 {full}")
                     transcript = []
-                    # Auto-close camera ~2s after MARK finishes speaking
-                    if self._player and hasattr(self._player, "stop_camera_stream"):
-                        async def _deferred_close():
-                            await asyncio.sleep(2.0)
-                            try:
-                                self._player.stop_camera_stream()  # type: ignore
-                            except Exception:
-                                pass
-                        asyncio.create_task(_deferred_close())
 
         except Exception as e:
             print(f"[Vision] ⚠️  Recv error: {e}")

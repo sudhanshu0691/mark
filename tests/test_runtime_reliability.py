@@ -75,14 +75,19 @@ def test_typed_commands_save_and_restore(history, monkeypatch):
     assert any(msg["content"] == "system info" for msg in planner.call_args.kwargs["history"])
 
 
-def test_dispatch_requires_real_approval_even_if_args_confirmed(monkeypatch, history):
+@pytest.mark.parametrize("args", [
+    {"action": "delete", "path": "sample", "confirmed": True},
+    {"action": "delete", "path": "sample", "permanent": True, "confirmed": True},
+    {"action": "move", "path": "sample", "destination": "elsewhere"},
+])
+def test_dispatch_requires_real_approval_even_if_args_confirmed(monkeypatch, history, args):
     live = MarkLive(Mock())
     live.ui.confirm_action = AsyncMock(return_value=False)
     operation = Mock(side_effect=AssertionError("denied action executed"))
     monkeypatch.setitem(__import__("main").NATIVE, "calls", operation)
     monkeypatch.setattr("main.TASKS", Mock())
     monkeypatch.setitem(__import__("main").NATIVE, "file_controller", operation)
-    call = SimpleNamespace(name="file_controller", args={"action":"delete","path":"sample","confirmed":True}, id="t")
+    call = SimpleNamespace(name="file_controller", args=args, id="t")
     result = asyncio.run(live._execute_tool(call))
     assert result.response["result"].startswith("[CANCELLED]")
     operation.assert_not_called()
@@ -114,6 +119,7 @@ def test_offline_startup_and_local_dispatch(history, monkeypatch):
     ui.task_start.return_value = 1
     ui.name = "MARK"
     live = MarkLive(ui)
+    monkeypatch.setattr(live, "_start_default_camera_features", lambda: None)
     monkeypatch.setattr(main, "_get_api_key", lambda: pytest.fail("offline mode looked up voice key"))
     monkeypatch.setattr(main, "NOTIF_WATCHER", SimpleNamespace(listeners=[], start=lambda: SimpleNamespace(ok=True), stop=lambda: None))
     monkeypatch.setattr(main, "TASKS", Mock())

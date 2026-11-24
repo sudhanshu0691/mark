@@ -76,7 +76,11 @@ def run_goal(goal: str, api_key: str = "", declarations: list[dict] | None = Non
     chat = chat or llm.chat_tools
     deps = verifier or _verify.default_deps(dispatch)
     decls = [d for d in (declarations or []) if d.get("name") not in _EXCLUDE]
-    system = SYSTEM + (f"\n\nCONTEXT:\n{context}" if context else "")
+    from core.plugin_router import plan as plugin_plan
+    workflow = plugin_plan(goal, decls)
+    if workflow:
+        log("[plugin router] " + workflow)
+    system = SYSTEM + (f"\n\n{workflow}" if workflow else "") + (f"\n\nCONTEXT:\n{context}" if context else "")
     messages: list[dict] = list(history or []) + [{"role": "user", "content": f"GOAL: {goal}"}]
     trace: list[str] = []
     recoveries: list[str] = []
@@ -110,7 +114,7 @@ def run_goal(goal: str, api_key: str = "", declarations: list[dict] | None = Non
             msg = chat(messages, decls, system=system)
         except llm.LLMUnavailable as e:
             return (f"RESULT: FAILED\nDONE: {'; '.join(trace) or 'nothing'}\n"
-                    f"NOT DONE: the configured model is not available ({e}){suffix()}")
+                    f"NOT DONE: model request failed ({e}){suffix()}")
         except Exception as e:
             return (f"RESULT: FAILED\nDONE: {'; '.join(trace) or 'nothing'}\n"
                     f"NOT DONE: brain error {type(e).__name__}: {e}{suffix()}")

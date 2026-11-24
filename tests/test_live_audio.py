@@ -79,3 +79,39 @@ def test_live_connect_starts_even_when_microphone_is_muted(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(live._serve())
     client.aio.live.connect.assert_called_once()
+
+
+def test_inactivity_is_not_misclassified_as_invalid_key():
+    from main import _is_live_inactivity_error, _is_invalid_api_key_error
+    idle = ExceptionGroup('task group', [RuntimeError('1008 None. Session closed due to client inactivity.')])
+    assert _is_live_inactivity_error(idle)
+    assert not _is_invalid_api_key_error(idle)
+    assert _is_invalid_api_key_error(RuntimeError('API key not valid'))
+    assert not _is_live_inactivity_error(RuntimeError('1008 policy violation'))
+    assert not _is_invalid_api_key_error(RuntimeError('1008 policy violation'))
+
+
+def test_receive_inactivity_does_not_print_traceback(capsys):
+    live = MarkLive.__new__(MarkLive)
+    live._live_in, live._live_out = [], []
+    class Socket:
+        async def receive(self):
+            if False:
+                yield None
+            raise RuntimeError('1008 None. Session closed due to client inactivity.')
+    live.session = Socket()
+    with pytest.raises(RuntimeError):
+        asyncio.run(live._receive_audio())
+    assert capsys.readouterr().out == ''
+
+
+def test_idle_waits_until_microphone_unmuted():
+    from main import _wait_for_microphone
+    async def run():
+        ui = Mock(muted=True)
+        task = asyncio.create_task(_wait_for_microphone(ui))
+        await asyncio.sleep(.05)
+        assert not task.done()
+        ui.muted = False
+        await asyncio.wait_for(task, 1)
+    asyncio.run(run())

@@ -239,6 +239,11 @@ class PluginManager:
             fn = owner.tools[name]["run"] if owner else None
         if fn is None or owner is None:
             return f"[FAILED] plugin tool '{name}' not found"
+        from core.plugin_safety import check_call, verify_result
+        error = check_call(name, args)
+        if error:
+            self.ctx.log(f"{name}: blocked: {error}")
+            return f"[FAILED] {error}"
         if owner.health == "unhealthy":
             return f"[FAILED] plugin tool '{name}' is unhealthy"
         try:
@@ -258,9 +263,10 @@ class PluginManager:
         except Exception as e:
             traceback.print_exc()
             return f"[FAILED] plugin tool '{name}' crashed\nREASON: {type(e).__name__}: {e}"
-        if isinstance(res, ActionResult):
-            return res.to_llm()
-        return "" if res is None else str(res)
+        out = res.to_llm() if isinstance(res, ActionResult) else ("" if res is None else str(res))
+        out = verify_result(name, args, out)
+        self.ctx.log(f"{name}: {out.splitlines()[0] if out else 'empty result'}")
+        return out
 
     def discover(self, query: str = "") -> str:
         """Return capability metadata for selecting the most suitable plugin."""

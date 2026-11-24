@@ -162,8 +162,6 @@ def _is_invalid_api_key_error(error: BaseException) -> bool:
         "status code: 401",
         "invalid authentication credentials",
         "expected oauth 2 access token",
-        "policy violation",
-        "1008",
     ))
 
 
@@ -176,6 +174,18 @@ def _exception_details(error: BaseException) -> str:
         if detail:
             messages.append(detail)
     return " | ".join(dict.fromkeys(message for message in messages if message))
+
+
+def _is_live_inactivity_error(error: BaseException) -> bool:
+    """Distinguish a normal idle socket close from authentication failures."""
+    detail = _exception_details(error).lower()
+    return "inactivity" in detail and ("1008" in detail or "session closed" in detail)
+
+
+async def _wait_for_microphone(ui) -> None:
+    """Avoid reconnecting an idle session repeatedly while the microphone is muted."""
+    while ui.muted:
+        await asyncio.sleep(0.25)
 
 
 def _is_live_audio_configuration_error(error: BaseException) -> bool:
@@ -219,6 +229,8 @@ _SCREEN_VERIFIED_TOOLS = {
 
 
 TOOL_DECLARATIONS = [
+    {"name": "gesture_mouse", "description": "Control webcam gesture mouse, enabled at startup when available. Actions: enable, disable, sensitivity_up, sensitivity_down, drag_on, drag_off, status.",
+     "parameters": {"type": "OBJECT", "properties": {"action": {"type": "STRING"}}, "required": ["action"]}},
     {
         "name": "open_app",
         "description": (
@@ -336,7 +348,7 @@ TOOL_DECLARATIONS = [
             "look at camera, analyze my screen, etc. "
             "You have NO visual ability without this tool. "
             "After the image is captured it is sent directly to you — describe what you see and answer the user's question. "
-            "When using camera: the live view stays open until user says close it or calls close_camera."
+            "The camera runs in the background without a preview panel."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -687,6 +699,14 @@ class MarkLive:
 
     def __init__(self, ui: MarkUI):
         self.ui             = ui
+        from actions.gesture_mouse import GestureMouse
+        from actions.camera_source import CAMERA
+        self._gesture_source = CAMERA
+        def gesture_status(status):
+            self.ui.show_gesture_status(status)
+            if str(status).startswith("OFF"):
+                self._gesture_source.unsubscribe(self.gesture_mouse)
+        self.gesture_mouse = GestureMouse(status=gesture_status)
         self._asst_name     = "MARK"
         self.session              = None
         self.audio_in_queue       = None
@@ -711,6 +731,7 @@ class MarkLive:
         self.screen_monitor = ScreenMonitor(interval=float(os.environ.get("MARK_SCREEN_INTERVAL", "2")))
         self.ui.on_screen_monitor_toggle = self.screen_monitor.set_enabled
         self.ui.on_runtime_stop = self.stop
+        self.ui.on_gesture_action = self._ui_gesture_action
         self.ui.on_text_command   = self._on_text_command
         self.ui.on_interrupt      = self.interrupt
         self.ui.on_call_action    = self._ui_call_action
@@ -733,6 +754,18 @@ class MarkLive:
         self.plugins = PluginManager(PluginContext(
             ui=ui, speak=lambda t: self.speak(t), call_tool=lambda n, a: self._dispatch_sync(n, a)))
         self.plugins.on_change = self._plugins_changed.set
+
+    def _ui_gesture_action(self, action: str) -> None:
+        if not self._loop or not self._loop.is_running():
+            self.ui.write_log("Gesture control is still starting.")
+            return
+        future = asyncio.run_coroutine_threadsafe(self._dispatch("gesture_mouse", {"action": action}), self._loop)
+        def completed(result):
+            try:
+                self.ui.write_log(str(result.result()).splitlines()[0])
+            except Exception as exc:
+                self.ui.write_log(f"Gesture control error: {type(exc).__name__}")
+        future.add_done_callback(completed)
 
     def _ui_call_action(self, action: str) -> None:
         r = NATIVE["calls"]({"action": action}, self.ui)
@@ -812,13 +845,22 @@ class MarkLive:
         if cfg["profile"] in {"offline", "low_resource"} and cfg.get("speak_local_replies"):
             try:
                 from actions.local_voice import speak_local
-                speak_local(head, self._local_cancel_event)
+                orb = getattr(self.ui, "orb", None)
+                if orb:
+                    orb.set_activity("local-speech", "speaking")
+                try:
+                    speak_local(head, self._local_cancel_event)
+                finally:
+                    if orb:
+                        orb.set_activity("local-speech", None)
             except Exception as exc:
                 self.ui.write_log(f"SYS: Speech output unavailable ({type(exc).__name__}).")
 
     def set_speaking(self, value: bool):
         with self._speaking_lock:
             self._is_speaking = value
+        if getattr(self.ui, "orb", None):
+            self.ui.orb.set_activity("live-speech", "speaking" if value else None)
         if value:
             self.ui.set_state("SPEAKING")
         elif not self.ui.muted:
@@ -932,8 +974,6 @@ class MarkLive:
         try:
             ans = await loop.run_in_executor(None, lambda: vision_answer(img_b, user_text, mime_t, extra))
             if ans:
-                if angle == "camera":
-                    asyncio.get_event_loop().call_later(6.0, self.ui.stop_camera_stream)
                 return (f"[DONE] {angle.capitalize()} analysed ({len(img_b):,} bytes).\n"
                         f"ANSWER: {ans}\n"
                         "RULE: Tell the user this answer in your own words, briefly. Do not call screen_process again for the same question.")
@@ -1116,9 +1156,34 @@ class MarkLive:
                     TASKS.stage(_tid, "RUNNING")
 
             from core import interaction_verify as _interaction_verify
-            _before_interaction = await asyncio.to_thread(_interaction_verify.snapshot) if _interaction_verify.supports(name, args) else None
+            _typing_action = name == "computer_settings" and str(args.get("action", "")).lower() in {"type_text", "write_on_screen", "type", "write"}
+            _before_interaction = await asyncio.to_thread(_interaction_verify.text_snapshot if _typing_action else _interaction_verify.snapshot) if _interaction_verify.supports(name, args) else None
 
-            if name in NATIVE:
+            if name == "gesture_mouse":
+                action = str(args.get("action", "")).lower()
+                if action == "enable":
+                    self._enable_gesture_mouse()
+                    result = "[UNVERIFIED] Gesture mouse starting; waiting for camera frames."
+                elif action == "disable":
+                    self.gesture_mouse.disable()
+                    result = "[DONE] Gesture mouse disabled."
+                elif action in ("drag_on", "drag_off"):
+                    with self.gesture_mouse._lock:
+                        self.gesture_mouse._release()
+                        self.gesture_mouse._pinch = None
+                        self.gesture_mouse.drag_mode = action == "drag_on"
+                    result = "[DONE] Gesture drag mode " + ("enabled." if action == "drag_on" else "disabled.")
+                elif action in ("sensitivity_up", "sensitivity_down"):
+                    with self.gesture_mouse._lock:
+                        cfg = self.gesture_mouse.config
+                        cfg.sensitivity = max(0.2, min(3.0, cfg.sensitivity + (0.2 if action == "sensitivity_up" else -0.2)))
+                        value = cfg.sensitivity
+                    result = f"[DONE] Gesture sensitivity set to {value:.1f}."
+                elif action == "status":
+                    result = "[DONE] Gesture mouse " + ("enabled." if self.gesture_mouse._enabled else "disabled.")
+                else:
+                    result = "[FAILED] Unknown gesture mouse action."
+            elif name in NATIVE:
                 result = await loop.run_in_executor(None, lambda: NATIVE[name](args, self.ui))
 
             elif name == "run_goal":
@@ -1320,7 +1385,8 @@ class MarkLive:
             self.ui.set_state("LISTENING")
 
         if "_before_interaction" in locals() and _interaction_verify.supports(name, args):
-            result = await asyncio.to_thread(_interaction_verify.verify, _before_interaction, args, str(result))
+            verifier = _interaction_verify.verify_text if _typing_action else _interaction_verify.verify
+            result = await asyncio.to_thread(verifier, _before_interaction, args, str(result))
 
         if _tid is not None:
             TASKS.stage(_tid, "VERIFYING")
@@ -1433,8 +1499,14 @@ class MarkLive:
                     blocksize=CHUNK_SIZE,
                     callback=callback,
                 ):
-                    while not self.ui.muted:
-                        await asyncio.sleep(0.1)
+                    if getattr(self.ui, "orb", None):
+                        self.ui.orb.set_activity("live-mic", "listening")
+                    try:
+                        while not self.ui.muted:
+                            await asyncio.sleep(0.1)
+                    finally:
+                        if getattr(self.ui, "orb", None):
+                            self.ui.orb.set_activity("live-mic", None)
         except Exception as e:
             print(f"[MARK] ❌ Mic: {e}")
             raise
@@ -1539,10 +1611,6 @@ class MarkLive:
                                 # This turn_complete IS the vision answer — close camera + release busy flag
                                 self._vision_close_pending = False
                                 self._vision_busy = False
-                                async def _cam_close():
-                                    await asyncio.sleep(2.0)
-                                    self.ui.stop_camera_stream()
-                                asyncio.create_task(_cam_close())
 
                     if response.tool_call:
                         fn_responses = []
@@ -1568,8 +1636,9 @@ class MarkLive:
                                 function_responses=fn_responses
                             )
         except Exception as e:
-            print(f"[MARK] ❌ Recv: {e}")
-            traceback.print_exc()
+            if not _is_live_inactivity_error(e):
+                print(f"[MARK] Receive error: {type(e).__name__}: {e}")
+                traceback.print_exc()
             raise
 
     async def _play_audio(self):
@@ -1912,12 +1981,28 @@ class MarkLive:
 
     # ── main loop ───────────────────────────────────────────────────────────
 
+    def _enable_gesture_mouse(self):
+        self.gesture_mouse.enable()
+        self._gesture_source.subscribe(self.gesture_mouse, self.gesture_mouse.submit,
+            lambda error: self.gesture_mouse.disable("OFF: CAMERA UNAVAILABLE"))
+
+    def _start_default_camera_features(self):
+        self.ui._post(self.ui.start_camera_stream)
+        try:
+            self._enable_gesture_mouse()
+        except Exception as exc:
+            self.ui.show_gesture_status("OFF: DEPENDENCY UNAVAILABLE")
+            self.ui.write_log(f"Gesture mouse unavailable: {exc}")
+
     async def run(self):
         self._run_task = asyncio.current_task()
+        startup = asyncio.create_task(asyncio.to_thread(self._start_default_camera_features))
         try:
             await self._serve()
         finally:
+            await startup
             self._local_cancel_event.set()
+            self.gesture_mouse.disable()
             self.screen_monitor.stop()
             self.plugins.stop()
             NOTIF_WATCHER.stop()
@@ -1926,6 +2011,7 @@ class MarkLive:
             _llm_config.providers.close()
 
     def stop(self):
+        self.gesture_mouse.disable()
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._run_task.cancel)
 
@@ -1959,6 +2045,7 @@ class MarkLive:
                 continue
             self._told_no_key = False
             attempted_handle, connected, client = None, False, None
+            wait_for_unmute = False
             try:
                 if hasattr(self.ui, "set_gemini_live_state"):
                     self.ui.set_gemini_live_state("TESTING")
@@ -2042,14 +2129,27 @@ class MarkLive:
                 # externally, which `except Exception` would miss, letting the
                 # exception escape the while-loop and causing asyncio.run() to
                 # start shutdown — resulting in "executor after shutdown" errors).
-                if "_PluginsChanged" in repr(e) or isinstance(e, _PluginsChanged):
+                if _is_live_inactivity_error(e):
+                    # Expected when no audio is sent, especially while muted.
+                    self._conn_backoff = 3
+                    wait_for_unmute = bool(self.ui.muted)
+                    self.ui.write_log("SYS: Voice session idle; " +
+                                      ("it will reconnect when the microphone is enabled." if wait_for_unmute
+                                       else "reconnecting."))
+                    if hasattr(self.ui, "set_gemini_live_state"):
+                        self.ui.set_gemini_live_state("IDLE" if wait_for_unmute else "DEGRADED")
+                elif "_PluginsChanged" in repr(e) or isinstance(e, _PluginsChanged):
                     self._resume_handle = None
                     self._conn_backoff = 0
                     self.ui.write_log("SYS: Reconnecting with updated plugins...")
-                print(f"[MARK] Live connection error ({type(e).__name__}); details withheld.")
+                if _is_live_inactivity_error(e):
+                    continue_idle = True
+                else:
+                    continue_idle = False
+                    print(f"[MARK] Live connection error ({type(e).__name__}); details withheld.")
 
                 # Invalid API key — stop hammering the API, prompt re-configuration
-                if _is_invalid_api_key_error(e):
+                if not continue_idle and _is_invalid_api_key_error(e):
                     self.ui.write_log(
                         "ERR: Gemini API key rejected. Create a new key at "
                         "https://aistudio.google.com/api-keys and paste it here."
@@ -2066,13 +2166,14 @@ class MarkLive:
                 # Keep the original SDK message visible so the user can fix the
                 # model, API access, quota, or network configuration correctly.
                 error_details = _exception_details(e)
-                if attempted_handle and not connected and any(marker in error_details.lower() for marker in
+                if not continue_idle and attempted_handle and not connected and any(marker in error_details.lower() for marker in
                         ("handle", "resum", "expired", "1007", "invalid argument", "not found")):
                     self._resume_handle = None
                     self.ui.write_log("SYS: Voice session expired. Restoring recent dialogue.")
                     continue
-                self.ui.write_log(f"ERR: Gemini connection failed ({type(e).__name__}).")
-                if _is_live_audio_configuration_error(e):
+                if not continue_idle:
+                    self.ui.write_log(f"ERR: Gemini connection failed ({type(e).__name__}).")
+                if not continue_idle and _is_live_audio_configuration_error(e):
                     self._live_disabled = True
                     self._live_input_ready = False
                     self.ui.write_log(
@@ -2084,7 +2185,7 @@ class MarkLive:
                     if hasattr(self.ui, "set_gemini_live_state"):
                         self.ui.set_gemini_live_state("UNAVAILABLE")
                     continue
-                if hasattr(self.ui, "set_gemini_live_state"):
+                if not continue_idle and hasattr(self.ui, "set_gemini_live_state"):
                     self.ui.set_gemini_live_state("DEGRADED")
 
                 # Network / timeout errors — log clearly and back off
@@ -2093,7 +2194,9 @@ class MarkLive:
                     "TimeoutError", "timed out", "getaddrinfo", "CancelledError",
                     "ConnectionRefusedError", "OSError", "Cannot connect",
                 ))
-                if _is_quota_error(err_str):
+                if continue_idle:
+                    pass
+                elif _is_quota_error(err_str):
                     self._conn_backoff = 300
                     self.ui.write_log("SYS: Gemini voice quota reached. The configured text provider keeps handling typed commands; "
                                       "voice retries in 5 minutes.")
@@ -2112,15 +2215,21 @@ class MarkLive:
                     client.close()
                 self.session = None
                 self._live_input_ready = False
+                if getattr(self.ui, "_gemini_live_state", None) == "READY":
+                    self.ui.set_gemini_live_state("IDLE")
 
             self.set_speaking(False)
             self.ui.set_state("SLEEPING")
 
+            if wait_for_unmute:
+                await _wait_for_microphone(self.ui)
             delay = getattr(self, "_conn_backoff", 3)
             await asyncio.sleep(delay)
 
 def main():
     ui = MarkUI("assets/face.png")
+    from mark_orb import start_orb
+    ui.orb = start_orb(on_restore=ui.restore_from_orb, visible=False)
     from core import llm as _llm_boot
     _llm_boot.set_provider_listener(ui.set_llm_provider)
     ui.set_llm_provider("sleep")
@@ -2139,6 +2248,7 @@ def main():
     except KeyboardInterrupt:
         print("\n[MARK] Shutting down...")
     finally:
+        ui.orb.close()
         if getattr(ui, "on_runtime_stop", None):
             ui.on_runtime_stop()
         worker.join(timeout=5)

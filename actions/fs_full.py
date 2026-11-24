@@ -438,6 +438,8 @@ def _open(p: Path) -> ActionResult:
 def fs_control(parameters: dict | None = None, player=None, **_) -> str:
     a = parameters or {}
     action = str(a.get("action", "")).lower().strip()
+    if action in {"delete", "move"}:
+        return failed("Action blocked", "Delete and move are disabled by user policy.").to_llm()
     path = a.get("path", "")
     name = a.get("name", "")
     if player:

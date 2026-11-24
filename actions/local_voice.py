@@ -18,12 +18,19 @@ class LocalVoice:
                 from actions.phone.speech import load_config, make_stt
                 frames = []
                 with sd.RawInputStream(samplerate=16000, channels=1, dtype="int16") as mic:
-                    deadline = time.monotonic() + 20
-                    while not self._released.is_set() and time.monotonic() < deadline:
-                        data, overflow = mic.read(480)
-                        if overflow:
-                            raise RuntimeError("Microphone buffer overflow")
-                        frames.append(bytes(data))
+                    orb = getattr(ui, "orb", None)
+                    if orb:
+                        orb.set_activity("local-mic", "listening")
+                    try:
+                        deadline = time.monotonic() + 20
+                        while not self._released.is_set() and time.monotonic() < deadline:
+                            data, overflow = mic.read(480)
+                            if overflow:
+                                raise RuntimeError("Microphone buffer overflow")
+                            frames.append(bytes(data))
+                    finally:
+                        if orb:
+                            orb.set_activity("local-mic", None)
                 if len(frames) < 8:
                     return
                 text = make_stt(load_config())(b"".join(frames), 16000)

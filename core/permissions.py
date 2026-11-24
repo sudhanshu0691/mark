@@ -16,6 +16,7 @@ PERM_FILE = BASE_DIR / "config" / "permissions.json"
 
 DEFAULTS = {
     "allowed_roots": [],             # [] = everything. Example: ["C:\\\\Users\\\\me", "D:\\\\"]
+    "allow_project_edits": False,    # opt in to editing MARK source files
     "allow_system_paths": False,     # True = may modify C:\\Windows, Program Files ...
     "delete_mode": "recycle",        # "recycle" (recoverable) | "permanent"
     "confirm_permanent_delete": True,
@@ -62,8 +63,21 @@ def check(path: str | Path, write: bool = False) -> tuple[bool, str]:
     if cfg.get("invalid_policy"):
         return False, "File access policy is unreadable. Repair config/permissions.json."
     target = _norm(path)
+    # The user's C: exception applies to reads as well as writes.
+    if platform.system() == "Windows" and Path(target).drive.lower() == "c:":
+        home = Path.home()
+        allowed_c = [home / "Downloads", home / "Desktop", home / "Music", home / "OneDrive" / "Desktop"]
+        if not any(_inside(target, _norm(root)) for root in allowed_c):
+            return False, "C: access is limited to Downloads, Desktop and Music."
     if write and _inside(target, _norm(BASE_DIR)) and not _inside(target, _norm(BASE_DIR / "data")):
-        return False, "MARK application files require a manual project edit."
+        protected = (".git", ".venv", "venv", "config", "memory/identity", "__pycache__")
+        private_file = Path(target).name.lower() in {".env", "runtime.env"}
+        blocked_project = any(_inside(target, _norm(BASE_DIR / part)) for part in protected)
+        safe_suffixes = {".py", ".md", ".txt", ".yaml", ".yml", ".toml", ".ini", ".bat"}
+        source_file = Path(target).suffix.lower() in safe_suffixes
+        if (not cfg.get("allow_project_edits") or blocked_project or private_file or
+                (not source_file and Path(target) != BASE_DIR and not Path(target).is_dir())):
+            return False, "MARK project edits are restricted by the local file access policy."
 
 
     roots = [_norm(r) for r in cfg.get("allowed_roots") or []]

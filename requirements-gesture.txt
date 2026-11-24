@@ -1,0 +1,7 @@
+# Optional MediaPipe Hands stack. Install separately from the Windows constraints file.
+mediapipe==0.10.21
+numpy>=1.26,<2
+opencv-python>=4.8,<4.12
+opencv-contrib-python>=4.8,<4.12
+jax==0.4.38
+jaxlib==0.4.38

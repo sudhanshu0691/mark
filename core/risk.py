@@ -58,6 +58,7 @@ RISK_MAP["computer_settings"].update(dict.fromkeys(
     ("shutdown", "restart", "sleep", "lock", "kill_app", "format", "security"), HIGH))
 RISK_MAP["file_controller"]["open"] = LOW
 RISK_MAP["open_app"] = {"*": LOW}
+RISK_MAP["gesture_mouse"] = {"*": LOW}
 RISK_MAP["computer_control"].update(dict.fromkeys(
     ("scroll", "move", "click", "double_click", "right_click", "screen_click",
      "screen_find", "screenshot", "focus_window", "wait", "copy"), LOW))
@@ -70,12 +71,41 @@ RISK_MAP["window_manager"].update(dict.fromkeys(
     ("list", "active", "focus", "switch", "maximize", "minimize", "snap_left", "snap_right", "wait"), LOW))
 RISK_MAP["software_manager"].update({"install": MEDIUM, "uninstall": HIGH})
 RISK_MAP["file_controller"].update(dict.fromkeys(
-    ("write", "append", "mkdir", "copy", "move", "rename", "zip", "unzip"), MEDIUM))
+    ("write", "append", "mkdir", "copy", "rename", "zip", "unzip"), MEDIUM))
+RISK_MAP["file_controller"]["move"] = HIGH
+RISK_MAP["computer_control"].update({"left_click": LOW, "drag": MEDIUM})
+RISK_MAP["browser_control"].update(dict.fromkeys(
+    ("go_to", "search", "new_tab", "switch", "list_browsers", "click", "smart_click",
+     "get_text", "get_url", "reload", "screenshot"), LOW))
+RISK_MAP["excel"].update(dict.fromkeys(
+    ("create", "append", "set_cell", "formula", "format", "sort", "summary", "chart", "recalculate"), MEDIUM))
+RISK_MAP["excel"]["remove_duplicates"] = HIGH
+RISK_MAP["computer_settings"].update(dict.fromkeys(
+    ("empty_recycle_bin", "empty_trash", "log_off", "logout", "sign_out", "hibernate",
+     "hibernate_computer", "sleep_computer", "restart_computer", "shutdown_computer",
+     "close_process", "force_close", "kill_process"), HIGH))
+
+# Only well-known navigation shortcuts are safe to infer from generic keyboard tools.
+_NAV_KEYS = {"up", "down", "left", "right", "pageup", "pagedown", "home", "end", "esc", "escape", "tab"}
+_NAV_HOTKEYS = {("ctrl", "equal"), ("ctrl", "+"), ("ctrl", "plus"), ("ctrl", "-"),
+                ("ctrl", "minus"), ("ctrl", "0"), ("alt", "left"), ("alt", "right"),
+                ("ctrl", "home"), ("ctrl", "end")}
+
 
 def classify(tool: str, args: dict | None = None) -> str:
     args = args or {}
     cfg = RISK_MAP.get(tool, {})
     action = str(args.get("action") or args.get("mode") or "*").strip().lower().replace("-", "_").replace(" ", "_")
+    if tool == "computer_control" and action == "press":
+        return LOW if str(args.get("key", "")).strip().lower() in _NAV_KEYS else HIGH
+    if tool == "computer_control" and action == "hotkey":
+        raw = args.get("keys", "")
+        keys = raw.split("+") if isinstance(raw, str) else raw if isinstance(raw, (tuple, list)) else []
+        # Preserve the common Ctrl++ spelling, whose final key is itself '+'.
+        if isinstance(raw, str) and raw.strip().lower() in {"ctrl++", "control++"}:
+            keys = ["ctrl", "+"]
+        keys = tuple("ctrl" if str(k).strip().lower() == "control" else str(k).strip().lower() for k in keys)
+        return LOW if keys in _NAV_HOTKEYS else HIGH
     if action in cfg:
         return cfg[action]
     if "*" in cfg:

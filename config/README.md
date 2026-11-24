@@ -13,3 +13,5 @@
 For example, in PowerShell run `Copy-Item config/runtime.example.env config/runtime.env`, then uncomment and fill in the settings you need. Do not overwrite an existing local configuration unless you intend to replace it. Credentials may also be saved through MARK's UI or the OS credential store. Never commit the local copies.
 
 Camera configuration has its own template: copy `vision_department/config/model_config.example.yaml` to `vision_department/config/model_config.yaml` and set the device ID locally. Face enrollment images and runtime memory are local data and are not distributed as examples.
+
+`allow_project_edits` in the local permissions file permits MARK to edit source files in its project when set to `true`; it defaults to `false` for new installations. Private configuration, environment files, Git metadata, identity images and the virtual environment remain protected. Other access rules still apply.

@@ -4,5 +4,6 @@
   "delete_mode": "recycle",
   "confirm_permanent_delete": true,
   "max_read_chars": 20000,
-  "extra_blocked_paths": []
+  "extra_blocked_paths": [],
+  "allow_project_edits": false
 }

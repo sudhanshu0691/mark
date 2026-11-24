@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import queue
 import threading
 import time
 from dataclasses import dataclass
@@ -31,15 +32,18 @@ class CameraStatus:
 
 class CameraMonitor:
     def __init__(self, on_frame: Callable[[bytes, CameraStatus], None] | None = None,
-                 on_alert: Callable[[bytes], None] | None = None):
+                 on_alert: Callable[[bytes], None] | None = None,
+                 on_raw_frame: Callable | None = None):
         self.on_frame = on_frame
         self.on_alert = on_alert
+        self.on_raw_frame = on_raw_frame
         self.identities = IdentityManager(threshold=float(os.getenv("MARK_FACE_THRESHOLD", "0.78")))
         self.unknowns = UnknownMonitor(
             duration=float(os.getenv("MARK_UNKNOWN_DURATION", "10")),
             cooldown=float(os.getenv("MARK_ALERT_COOLDOWN", "300")),
         )
         self._stop = threading.Event()
+        self._frames = queue.Queue(maxsize=1)
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
@@ -55,33 +59,36 @@ class CameraMonitor:
         self._stop.set()
 
     def _run(self) -> None:
-        index = int(os.getenv("MARK_CAMERA_INDEX", "0"))
-        cap = None
+        from actions.camera_source import CAMERA
+        def enqueue(frame):
+            try:
+                self._frames.put_nowait(frame.copy())
+            except queue.Full:
+                pass
+        def on_error(error):
+            self.unknowns.reset()
+            self._emit(b"", CameraStatus(False, 0, (), False, error))
+            self._stop.set()
         try:
-            cap = cv2.VideoCapture(index, cv2.CAP_DSHOW if os.name == "nt" else cv2.CAP_ANY)
-            if not cap.isOpened():
-                self._emit(b"", CameraStatus(False, 0, (), False, f"camera index {index} could not be opened"))
-                return
             classifier = self._face_detector()
-            while not self._stop.wait(0.1):
-                ok, frame = cap.read()
-                if not ok or frame is None:
-                    self.unknowns.reset()
-                    self._emit(b"", CameraStatus(False, 0, (), False, "camera returned no frame"))
+            CAMERA.subscribe(self, enqueue, on_error)
+            while not self._stop.is_set():
+                try:
+                    frame = self._frames.get(timeout=0.2)
+                except queue.Empty:
                     continue
+                if self.on_raw_frame:
+                    self.on_raw_frame(frame)
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 boxes = classifier.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=6, minSize=(60, 60))
-                matches: list[Match] = []
-                for x, y, w, h in boxes:
-                    matches.append(self.identities.match(self.identities.embedding(frame[y:y + h, x:x + w])))
-                detections = [Detection(match.name, match.reliable) for match in matches]
-                self._emit_frame(frame, detections)
+                matches = [self.identities.match(self.identities.embedding(frame[y:y+h, x:x+w]))
+                           for x, y, w, h in boxes]
+                self._emit_frame(frame, [Detection(match.name, match.reliable) for match in matches])
         except Exception as exc:
             self.unknowns.reset()
             self._emit(b"", CameraStatus(False, 0, (), False, f"camera analysis failed: {type(exc).__name__}: {exc}"))
         finally:
-            if cap is not None:
-                cap.release()
+            CAMERA.unsubscribe(self)
 
     @staticmethod
     def _face_detector():

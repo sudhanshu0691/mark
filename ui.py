@@ -43,7 +43,7 @@ if sys.platform == "win32":
 
 import numpy as np
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import (QCloseEvent, QColor, QFont, QImage, QPainter, QPen, QPixmap, QPolygonF,
                            QRadialGradient, QShowEvent, QTransform)
 from PySide6.QtWidgets import (
@@ -74,7 +74,6 @@ PANELS: dict[str, tuple[str, bool, tuple[float, float, float, float]]] = {
     "info":    ("⌁  LIVE INFO",      False, (0.012, 0.61, 0.26, 0.27)),
     "tasks":   ("▤  TASKS & ALERTS", False, (0.728, 0.03, 0.26, 0.20)),
     "verify":  ("✓  VERIFICATION",   False, (0.728, 0.25, 0.26, 0.20)),
-    "camera":  ("◉  LIVE CAMERA",    False, (0.728, 0.47, 0.26, 0.22)),
     "system":  ("⌗  SYSTEM STATUS",  False, (0.728, 0.71, 0.26, 0.19)),
     "vision":  ("⌖  VISION MONITOR", False, (0.300, 0.03, 0.40, 0.34)),
 }
@@ -644,7 +643,7 @@ class MarkUI(QMainWindow):
             self._gemini_memory_state = "CONFIGURED" if gemini_cfg.get("memory_model") else "NOT CONFIGURED"
         except Exception:
             self._gemini_text_state = self._gemini_memory_state = "UNAVAILABLE"
-        self.muted = True
+        self.muted = False
         self._file: str | None = None
         self._camera_monitor = None
         self._closing = False
@@ -653,6 +652,7 @@ class MarkUI(QMainWindow):
         self._state = "SLEEPING"
         self.on_screen_monitor_toggle = None
         self._screen_monitor_enabled = True
+        self.on_gesture_action = None
         self.on_text_command = None
         self.on_interrupt = None
         self.on_call_action = None
@@ -713,8 +713,8 @@ class MarkUI(QMainWindow):
 
     def set_gemini_live_state(self, state: str) -> None:
         """Update the UI's Live indicator from actual session lifecycle events."""
-        self._gemini_live_state = state if state in {"NOT CONFIGURED", "CONFIGURED", "TESTING", "READY", "DEGRADED", "UNAVAILABLE"} else "UNAVAILABLE"
-        self._post(self._refresh_status)
+        self._gemini_live_state = state if state in {"NOT CONFIGURED", "CONFIGURED", "TESTING", "READY", "IDLE", "DEGRADED", "UNAVAILABLE"} else "UNAVAILABLE"
+        self._post(lambda: (self._paint_llm_provider(self._llm_provider), self._refresh_status()))
 
     # ---- config ----------------------------------------------------------------
     @staticmethod
@@ -782,7 +782,7 @@ class MarkUI(QMainWindow):
         self.voice_level.setFixedWidth(100)
         self.voice_level.setToolTip("Live microphone / speaker level")
         header.addWidget(self.voice_level)
-        self.mic_button = self._icon_button("◌", "Enable Gemini Live microphone", self._toggle_mic)
+        self.mic_button = self._icon_button("\u25d6", "Microphone on", self._toggle_mic)
         header.addWidget(self.mic_button)
         header.addWidget(self._icon_button("⌘", "API credentials", self._configure_key))
         stop = self._icon_button("■", "Stop current task", self._interrupt)
@@ -792,6 +792,19 @@ class MarkUI(QMainWindow):
         self.menu_button = self._icon_button("≡", "Panels & layout", self._open_menu)
         header.addWidget(self.menu_button)
         root.addLayout(header)
+
+        gesture_row = QHBoxLayout()
+        self.gesture_status_label = QLabel("GESTURE OFF")
+        self.gesture_status_label.setToolTip("Gesture mouse status")
+        gesture_row.addWidget(self.gesture_status_label)
+        self.gesture_enable_button = QPushButton("Enable")
+        self.gesture_disable_button = QPushButton("Disable")
+        self.gesture_enable_button.clicked.connect(lambda: self._gesture_action("enable"))
+        self.gesture_disable_button.clicked.connect(lambda: self._gesture_action("disable"))
+        gesture_row.addWidget(self.gesture_enable_button)
+        gesture_row.addWidget(self.gesture_disable_button)
+        gesture_row.addStretch(1)
+        root.addLayout(gesture_row)
 
         self.stage = Stage(self.name)
         root.addWidget(self.stage, 1)
@@ -856,28 +869,12 @@ class MarkUI(QMainWindow):
             sl.addWidget(m)
         sl.addStretch(1)
 
-        cam_body = QWidget()
-        cml = QVBoxLayout(cam_body)
-        cml.setContentsMargins(0, 0, 0, 0)
-        self.camera_status_label = QLabel("CAMERA STARTING")
-        self.camera_status_label.setObjectName("muted")
-        self.camera = QLabel("Connecting to camera…")
-        self.camera.setObjectName("muted")
-        self.camera.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.camera.setMinimumSize(120, 80)
-        row = QHBoxLayout()
-        row.addWidget(self.camera_status_label, 1)
-        self.camera_button = self._icon_button("◉", "Stop camera", self._toggle_camera)
-        row.addWidget(self.camera_button)
-        cml.addLayout(row)
-        cml.addWidget(self.camera, 1)
-
         self.vision_holder = QWidget()
         vh = QVBoxLayout(self.vision_holder)
         vh.setContentsMargins(0, 0, 0, 0)
 
         bodies = {"chat": self.chat, "command": cmd_body, "info": self.info, "tasks": self.tasks,
-                  "verify": verify_body, "camera": cam_body, "system": sys_body, "vision": self.vision_holder}
+                  "verify": verify_body, "system": sys_body, "vision": self.vision_holder}
 
         saved_layout = cfg.get("mark_layout", {})
         saved_vis = cfg.get("mark_panels", {})
@@ -904,7 +901,7 @@ class MarkUI(QMainWindow):
     def _build_llm_status(self, header: QHBoxLayout) -> None:
         frame = QFrame()
         frame.setObjectName("llmStatus")
-        frame.setToolTip("Active language model provider")
+        frame.setToolTip("Text requests and Gemini Live connection status")
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(4, 3, 4, 3)
         layout.setSpacing(0)
@@ -914,6 +911,10 @@ class MarkUI(QMainWindow):
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._llm_labels[provider] = label
             layout.addWidget(label)
+        self.gemini_live_label = QLabel("GEMINI LIVE")
+        self.gemini_live_label.setObjectName("llmName")
+        self.gemini_live_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.gemini_live_label)
         header.addWidget(frame)
         self._paint_llm_provider(self._llm_provider)
 
@@ -931,8 +932,14 @@ class MarkUI(QMainWindow):
     def _paint_llm_provider(self, provider: str) -> None:
         for name, label in self._llm_labels.items():
             color = "#4ADE80" if name == provider else "#FCA5A5"
-            label.setText(f"{name.upper()} - {'WORKING' if name == provider else 'SLEEPING'}")
+            label.setText(f"{name.upper()} TEXT - {'WORKING' if name == provider else 'IDLE'}")
             label.setStyleSheet(f"color:{color};")
+        live_state = self._gemini_live_state
+        live_text = {"READY": "CONNECTED", "TESTING": "CONNECTING", "IDLE": "IDLE",
+                     "DEGRADED": "RECONNECTING", "UNAVAILABLE": "UNAVAILABLE",
+                     "NOT CONFIGURED": "NOT CONFIGURED", "CONFIGURED": "OFFLINE"}.get(live_state, "OFFLINE")
+        self.gemini_live_label.setText(f"GEMINI LIVE - {live_text}")
+        self.gemini_live_label.setStyleSheet(f"color:{'#4ADE80' if live_state == 'READY' else '#FCA5A5'};")
 
     # ---- panel switching / menu --------------------------------------------------
     def _on_geometry(self, key: str) -> None:
@@ -1246,32 +1253,21 @@ class MarkUI(QMainWindow):
 
     # ---- camera --------------------------------------------------------------------------
     def show_camera_frame(self, img_bytes: bytes | None) -> None:
-        def show():
-            if img_bytes is None:
-                self.camera.setPixmap(QPixmap())
-                self.camera.setText("Camera preview is off")
-                self.camera_status_label.setText("CAMERA OFF — no capture is active")
-                return
-            if not self.stage.panels["camera"].isVisible():
-                return  # nothing to draw while the panel is switched off
-            pm = QPixmap()
-            if pm.loadFromData(img_bytes):
-                pm = pm.transformed(
-                    QTransform().scale(-1, 1),
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-                self.camera.setText("")
-                self.camera.setPixmap(pm.scaled(self.camera.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-                self.camera_status_label.setText("CAMERA LIVE")
-        self._post(show)
+        # Camera capture remains available without a live preview panel.
+        pass
 
     def show_camera_status(self, status: str) -> None:
-        def update():
-            self.camera.setToolTip(str(status))
-            self.camera_status_label.setText(str(status))
-            if any(w in str(status) for w in ("UNKNOWN", "ERROR", "FAILED")):
-                self._auto("camera")
-        self._post(update)
+        if any(word in str(status).upper() for word in ("ERROR", "FAILED")):
+            self.write_log("CAMERA: " + str(status))
+
+    def _gesture_action(self, action: str) -> None:
+        if self.on_gesture_action:
+            self.on_gesture_action(action)
+        else:
+            self.write_log("Gesture control is still starting.")
+
+    def show_gesture_status(self, status: str) -> None:
+        self._post(lambda: self.gesture_status_label.setText("GESTURE " + str(status)))
 
     def start_camera_stream(self) -> None:
         if self._closing or self._camera_monitor is not None:
@@ -1282,7 +1278,7 @@ class MarkUI(QMainWindow):
 
             def on_frame(frame, status):
                 self.show_camera_frame(frame)
-                text = status.error if not status.connected and status.error else (
+                text = "ERROR: " + status.error if not status.connected and status.error else (
                     "UNKNOWN PERSON" if status.unknown else (", ".join(status.names) if status.names else "NO FACE"))
                 self.show_camera_status(f"{text} | {status.pending_seconds:.1f}s")
 
@@ -1294,13 +1290,9 @@ class MarkUI(QMainWindow):
 
             self._camera_monitor = CameraMonitor(on_frame=on_frame, on_alert=on_alert)
             self._camera_monitor.start()
-            self.camera_button.setToolTip("Stop camera")
-            self.camera_button.setAccessibleName("Stop camera")
         except Exception as exc:
             self._camera_monitor = None
             self.show_camera_status(f"CAMERA ERROR: {type(exc).__name__}: {exc}")
-            self.camera_button.setToolTip("Retry camera")
-            self.camera_button.setAccessibleName("Retry camera")
 
     def stop_camera_stream(self) -> None:
         monitor = self._camera_monitor
@@ -1310,9 +1302,7 @@ class MarkUI(QMainWindow):
                 monitor.stop()
             except Exception:
                 pass
-        self.show_camera_frame(None)
-        self.camera_button.setToolTip("Start camera")
-        self.camera_button.setAccessibleName("Start camera")
+
 
     def _toggle_camera(self) -> None:
         if self._camera_monitor is None:
@@ -1413,6 +1403,24 @@ class MarkUI(QMainWindow):
             self._file = paths[0]
             self.write_log(f"SYS: selected file {Path(paths[0]).name}")
             event.acceptProposedAction()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange:
+            orb = getattr(self, "orb", None)
+            if orb:
+                if self.isMinimized():
+                    orb.show()
+                else:
+                    orb.hide()
+
+    def restore_from_orb(self) -> None:
+        def restore():
+            if not self._closing:
+                self.showNormal()
+                self.raise_()
+                self.activateWindow()
+        self._post(restore)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._closing = True
